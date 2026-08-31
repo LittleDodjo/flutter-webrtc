@@ -1,5 +1,7 @@
 #include "flutter_video_renderer.h"
 
+#include <algorithm>
+
 namespace flutter_webrtc_plugin {
 
 FlutterVideoRenderer::~FlutterVideoRenderer() {}
@@ -23,13 +25,33 @@ const FlutterDesktopPixelBuffer* FlutterVideoRenderer::CopyPixelBuffer(
     size_t height) const {
   mutex_.lock();
   if (pixel_buffer_.get() && frame_.get()) {
-    if (pixel_buffer_->width != frame_->width() ||
-        pixel_buffer_->height != frame_->height()) {
+    // Движок просит текстуру под её фактический размер на экране и после
+    // вызова перечитывает реальный размер из pixel_buffer_. Конвертировать
+    // кадр целиком незачем: поток 1440p в плитке 320x180 — это полноразмерный
+    // ScaleFrom на CPU и 14 МБ заливки на каждый нарисованный кадр.
+    int target_width = frame_->width();
+    int target_height = frame_->height();
+    if (width > 0 && height > 0 && target_width > 0 && target_height > 0) {
+      // Пропорции держим сами и никогда не увеличиваем: виджет масштабирует
+      // текстуру исходя из videoWidth/videoHeight, и непропорциональный ужим
+      // дал бы искажение картинки.
+      const double scale = std::min(
+          {1.0, static_cast<double>(width) / target_width,
+           static_cast<double>(height) / target_height});
+      if (scale < 1.0) {
+        target_width = std::max(2, static_cast<int>(target_width * scale) & ~1);
+        target_height =
+            std::max(2, static_cast<int>(target_height * scale) & ~1);
+      }
+    }
+
+    if (pixel_buffer_->width != static_cast<size_t>(target_width) ||
+        pixel_buffer_->height != static_cast<size_t>(target_height)) {
       size_t buffer_size =
-          (size_t(frame_->width()) * size_t(frame_->height())) * (32 >> 3);
+          (size_t(target_width) * size_t(target_height)) * (32 >> 3);
       rgb_buffer_.reset(new uint8_t[buffer_size]);
-      pixel_buffer_->width = frame_->width();
-      pixel_buffer_->height = frame_->height();
+      pixel_buffer_->width = target_width;
+      pixel_buffer_->height = target_height;
     }
 
     frame_->ConvertToARGB(RTCVideoFrame::Type::kABGR, rgb_buffer_.get(), 0,
