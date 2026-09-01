@@ -14,6 +14,10 @@
 #include "libwebrtc.h"
 #include "rtc_logging.h"
 
+#if defined(SQUEAK_USE_RNNOISE)
+#include "squeak_rnnoise_processor.h"
+#endif
+
 namespace flutter_webrtc_plugin {
 
 using namespace libwebrtc;
@@ -45,6 +49,13 @@ class FlutterWebRTC : public FlutterWebRTCBase,
  private:
   void initLoggerCallback(RTCLoggingSeverity severity);
   RTCLoggingSeverity str2LogSeverity(std::string str);
+
+#if defined(SQUEAK_USE_RNNOISE)
+  // Живёт весь сеанс: адаптер APM держит на него сырой указатель, а сеть
+  // подстраивается под голос — пересоздавать её на каждом переключении значит
+  // терять адаптацию.
+  std::unique_ptr<RnnoiseProcessor> rnnoise_;
+#endif
 };
 
 }  // namespace flutter_webrtc_plugin
