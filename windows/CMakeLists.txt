@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.15)
 set(PROJECT_NAME "flutter_webrtc")
-project(${PROJECT_NAME} LANGUAGES CXX)
+# C нужен для вендоренного RNNoise — он на чистом си.
+project(${PROJECT_NAME} LANGUAGES CXX C)
 
 if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.24.0")
   cmake_policy(SET CMP0135 NEW)
@@ -29,6 +30,14 @@ add_library(${PLUGIN_NAME} SHARED
   "../common/cpp/src/flutter_screen_capture.cc"
   "../common/cpp/src/flutter_webrtc.cc"
   "../common/cpp/src/flutter_webrtc_base.cc"
+  "../common/cpp/src/squeak_rnnoise_processor.cc"
+  "../third_party/rnnoise/src/celt_lpc.c"
+  "../third_party/rnnoise/src/denoise.c"
+  "../third_party/rnnoise/src/kiss_fft.c"
+  "../third_party/rnnoise/src/pitch.c"
+  "../third_party/rnnoise/src/rnn.c"
+  "../third_party/rnnoise/src/rnn_data.c"
+  "../third_party/rnnoise/src/rnn_reader.c"
   "application_loopback_capturer.cc"
   "loopback_capturer_factory.cc"
   "flutter_webrtc_plugin.cc"
@@ -39,6 +48,8 @@ include_directories(
   "${CMAKE_CURRENT_SOURCE_DIR}"
   "${CMAKE_CURRENT_SOURCE_DIR}/../common/cpp/include"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/svpng"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/rnnoise/include"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/rnnoise/src"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/include"
 )
 
@@ -46,6 +57,9 @@ apply_standard_settings(${PLUGIN_NAME})
 set_target_properties(${PLUGIN_NAME} PROPERTIES
   CXX_VISIBILITY_PRESET hidden)
 target_compile_definitions(${PLUGIN_NAME} PRIVATE FLUTTER_PLUGIN_IMPL)
+# Шумодав RNNoise. Флаг оставлен, чтобы плагин собирался и без вендоренных
+# исходников — тогда ручка setRnnoiseEnabled просто отвечает false.
+target_compile_definitions(${PLUGIN_NAME} PRIVATE SQUEAK_USE_RNNOISE)
 target_include_directories(${PLUGIN_NAME} INTERFACE
   "${CMAKE_CURRENT_SOURCE_DIR}"
   "${CMAKE_CURRENT_SOURCE_DIR}/../common/cpp/include"
