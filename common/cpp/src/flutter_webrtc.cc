@@ -21,6 +21,16 @@ FlutterWebRTC::FlutterWebRTC(FlutterWebRTCPlugin* plugin)
 
 FlutterWebRTC::~FlutterWebRTC() {}
 
+#if defined(SQUEAK_USE_RNNOISE)
+void FlutterWebRTC::EnsureCaptureProcessor() {
+  if (capture_processor_) return;
+  capture_processor_ = std::make_unique<SqueakCaptureProcessor>();
+  // Ставим постпроцессором один раз и навсегда: дальше он сам ничего не
+  // делает, пока шумодав выключен, а усиление равно единице.
+  audio_processing()->SetCapturePostProcessing(capture_processor_.get());
+}
+#endif
+
 void FlutterWebRTC::HandleMethodCall(
     const MethodCallProxy& method_call,
     std::unique_ptr<MethodResultProxy> result) {
@@ -1287,21 +1297,27 @@ void FlutterWebRTC::HandleMethodCall(
       RTCLoggingSeverity severity = str2LogSeverity(severityStr);
       initLoggerCallback(severity);
     }
-  } else if (method_call.method_name().compare("setRnnoiseEnabled") == 0) {
+  } else if (method_call.method_name().compare("setRnnoiseEnabled") == 0 ||
+             method_call.method_name().compare("setMicGain") == 0) {
 #if defined(SQUEAK_USE_RNNOISE)
     const EncodableMap params =
         GetValue<EncodableMap>(*method_call.arguments());
-    const auto it = params.find(EncodableValue("enabled"));
-    const bool enabled =
-        it != params.end() && TypeIs<bool>(it->second) && GetValue<bool>(it->second);
 
-    if (!rnnoise_) {
-      rnnoise_ = std::make_unique<RnnoiseProcessor>();
-      // Ставим постпроцессором один раз и навсегда: дальше он сам молчит,
-      // пока выключен, и снимать его с APM ради этого не нужно.
-      audio_processing()->SetCapturePostProcessing(rnnoise_.get());
+    EnsureCaptureProcessor();
+
+    if (method_call.method_name().compare("setMicGain") == 0) {
+      const auto it = params.find(EncodableValue("gain"));
+      const double gain =
+          it != params.end() && TypeIs<double>(it->second)
+              ? GetValue<double>(it->second)
+              : 1.0;
+      capture_processor_->SetGain(static_cast<float>(gain));
+    } else {
+      const auto it = params.find(EncodableValue("enabled"));
+      const bool enabled = it != params.end() && TypeIs<bool>(it->second) &&
+                           GetValue<bool>(it->second);
+      capture_processor_->SetRnnoiseEnabled(enabled);
     }
-    rnnoise_->SetEnabled(enabled);
     result->Success(EncodableValue(true));
 #else
     result->Success(EncodableValue(false));
