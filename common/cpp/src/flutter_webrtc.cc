@@ -1287,6 +1287,25 @@ void FlutterWebRTC::HandleMethodCall(
       RTCLoggingSeverity severity = str2LogSeverity(severityStr);
       initLoggerCallback(severity);
     }
+  } else if (method_call.method_name().compare("setRnnoiseEnabled") == 0) {
+#if defined(SQUEAK_USE_RNNOISE)
+    const EncodableMap params =
+        GetValue<EncodableMap>(*method_call.arguments());
+    const auto it = params.find(EncodableValue("enabled"));
+    const bool enabled =
+        it != params.end() && TypeIs<bool>(it->second) && GetValue<bool>(it->second);
+
+    if (!rnnoise_) {
+      rnnoise_ = std::make_unique<RnnoiseProcessor>();
+      // Ставим постпроцессором один раз и навсегда: дальше он сам молчит,
+      // пока выключен, и снимать его с APM ради этого не нужно.
+      audio_processing()->SetCapturePostProcessing(rnnoise_.get());
+    }
+    rnnoise_->SetEnabled(enabled);
+    result->Success(EncodableValue(true));
+#else
+    result->Success(EncodableValue(false));
+#endif
   } else {
     if (HandleFrameCryptorMethodCall(method_call, std::move(result), &result)) {
       return;
