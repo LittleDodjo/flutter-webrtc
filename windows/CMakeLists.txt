@@ -30,7 +30,7 @@ add_library(${PLUGIN_NAME} SHARED
   "../common/cpp/src/flutter_screen_capture.cc"
   "../common/cpp/src/flutter_webrtc.cc"
   "../common/cpp/src/flutter_webrtc_base.cc"
-  "../common/cpp/src/squeak_rnnoise_processor.cc"
+  "../common/cpp/src/squeak_capture_processor.cc"
   "../third_party/rnnoise/src/celt_lpc.c"
   "../third_party/rnnoise/src/denoise.c"
   "../third_party/rnnoise/src/kiss_fft.c"
