@@ -79,8 +79,11 @@ target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::GTK)
 # uint32_t without including <cstdint>. Force-include <cstdint> for every
 # translation unit of this target so those headers build under strict
 # toolchains, instead of editing the downloaded third-party headers in place.
+# Только для C++: у вендоренного RNNoise исходники на чистом си, и <cstdint>
+# им подсунуть нельзя — компилятор падал на «'cstdint' file not found».
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-  target_compile_options(${PLUGIN_NAME} PRIVATE -include cstdint)
+  target_compile_options(${PLUGIN_NAME} PRIVATE
+    "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include cstdint>")
 endif()
 
 # ---------------------------------------------------------------------------
