@@ -40,6 +40,17 @@
 #include "celt_lpc.h"
 #include "math.h"
 
+/* MSVC не умеет массивы переменной длины ни в C, ни в C++ — там те же кадры
+   берём со стека через _alloca. Ни одно из этих объявлений не стоит в цикле,
+   так что стек растёт ровно на кадр вызова. */
+#ifdef _MSC_VER
+#include <malloc.h>
+#define RNN_VLA(type, name, count) \
+   type *name = (type *)_alloca((size_t)(count) * sizeof(type))
+#else
+#define RNN_VLA(type, name, count) type name[count]
+#endif
+
 static void find_best_pitch(opus_val32 *xcorr, opus_val16 *y, int len,
                             int max_pitch, int *best_pitch
 #ifdef FIXED_POINT
@@ -294,9 +305,9 @@ void rnn_pitch_search(const opus_val16 *x_lp, opus_val16 *y,
    celt_assert(max_pitch>0);
    lag = len+max_pitch;
 
-   opus_val16 x_lp4[len>>2];
-   opus_val16 y_lp4[lag>>2];
-   opus_val32 xcorr[max_pitch>>1];
+   RNN_VLA(opus_val16, x_lp4, len>>2);
+   RNN_VLA(opus_val16, y_lp4, lag>>2);
+   RNN_VLA(opus_val32, xcorr, max_pitch>>1);
 
    /* Downsample by 2 again */
    for (j=0;j<len>>2;j++)
@@ -440,7 +451,7 @@ opus_val16 rnn_remove_doubling(opus_val16 *x, int maxperiod, int minperiod,
       *T0_=maxperiod-1;
 
    T = T0 = *T0_;
-   opus_val32 yy_lookup[maxperiod+1];
+   RNN_VLA(opus_val32, yy_lookup, maxperiod+1);
    dual_inner_prod(x, x, x-T0, N, &xx, &xy);
    yy_lookup[0] = xx;
    yy=xx;

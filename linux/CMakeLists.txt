@@ -52,6 +52,8 @@ include_directories(
   "${CMAKE_CURRENT_SOURCE_DIR}/../common/cpp/include"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/include"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/svpng"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/rnnoise/include"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/rnnoise/src"
 )
 
 apply_standard_settings(${PLUGIN_NAME})

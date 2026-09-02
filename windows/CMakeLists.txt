@@ -60,6 +60,9 @@ target_compile_definitions(${PLUGIN_NAME} PRIVATE FLUTTER_PLUGIN_IMPL)
 # Шумодав RNNoise. Флаг оставлен, чтобы плагин собирался и без вендоренных
 # исходников — тогда ручка setRnnoiseEnabled просто отвечает false.
 target_compile_definitions(${PLUGIN_NAME} PRIVATE SQUEAK_USE_RNNOISE)
+# M_PI в <math.h> у MSVC появляется только с этим макросом — на нём падал
+# denoise.c.
+target_compile_definitions(${PLUGIN_NAME} PRIVATE _USE_MATH_DEFINES)
 target_include_directories(${PLUGIN_NAME} INTERFACE
   "${CMAKE_CURRENT_SOURCE_DIR}"
   "${CMAKE_CURRENT_SOURCE_DIR}/../common/cpp/include"
