@@ -16,6 +16,16 @@ set(CMAKE_CXX_STANDARD 17)
 
 add_definitions(-DRTC_DESKTOP_DEVICE)
 
+set(RNNOISE_SOURCES
+  "../third_party/rnnoise/src/celt_lpc.c"
+  "../third_party/rnnoise/src/denoise.c"
+  "../third_party/rnnoise/src/kiss_fft.c"
+  "../third_party/rnnoise/src/pitch.c"
+  "../third_party/rnnoise/src/rnn.c"
+  "../third_party/rnnoise/src/rnn_data.c"
+  "../third_party/rnnoise/src/rnn_reader.c"
+)
+
 add_library(${PLUGIN_NAME} SHARED
   "../common/cpp/src/flutter_data_channel.cc"
   "../common/cpp/src/flutter_data_packet_cryptor.cc"
@@ -29,13 +39,7 @@ add_library(${PLUGIN_NAME} SHARED
   "../common/cpp/src/flutter_webrtc.cc"
   "../common/cpp/src/flutter_webrtc_base.cc"
   "../common/cpp/src/squeak_capture_processor.cc"
-  "../third_party/rnnoise/src/celt_lpc.c"
-  "../third_party/rnnoise/src/denoise.c"
-  "../third_party/rnnoise/src/kiss_fft.c"
-  "../third_party/rnnoise/src/pitch.c"
-  "../third_party/rnnoise/src/rnn.c"
-  "../third_party/rnnoise/src/rnn_data.c"
-  "../third_party/rnnoise/src/rnn_reader.c"
+  ${RNNOISE_SOURCES}
   "../common/cpp/src/flutter_common.cc"
   "loopback_capturer_factory.cc"
   "pulse_loopback_capturer.cc"
@@ -95,6 +99,17 @@ endif()
 # PipeWire ships a PulseAudio compat layer, so libpulse covers both stacks.
 # On Manjaro/.41 the dev headers come from the base `libpulse` package.
 # ---------------------------------------------------------------------------
+# Вендоренный RNNoise — чужой код, и строгие флаги Flutter'а (-Wall -Werror)
+# ему не по размеру: upstream намеренно роняет процесс через *(int*)0=0, а
+# clang считает это ошибкой -Wnull-dereference. Диагностику для этих файлов
+# глушим целиком, вместо правки исходников апстрима.
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+  set_source_files_properties(
+    ${RNNOISE_SOURCES}
+    PROPERTIES COMPILE_OPTIONS "-w"
+  )
+endif()
+
 find_package(PkgConfig)
 if(PkgConfig_FOUND)
   pkg_check_modules(PULSE IMPORTED_TARGET libpulse libpulse-simple)
