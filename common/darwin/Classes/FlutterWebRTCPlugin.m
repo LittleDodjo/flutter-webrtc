@@ -17,6 +17,7 @@
 #import "FlutterRTCVideoPlatformViewController.h"
 #endif
 #import "AudioManager.h"
+#import "SqueakCaptureProcessor.h"
 
 #import <AVFoundation/AVFoundation.h>
 #import <WebRTC/RTCFieldTrials.h>
@@ -119,6 +120,7 @@ void postEvent(FlutterEventSink _Nullable sink, id _Nullable event) {
   BOOL _speakerOnButPreferBluetooth;
   AVAudioSessionPort _preferredInput;
   AudioManager* _audioManager;
+  SqueakCaptureProcessor* _captureProcessor;
 #if TARGET_OS_IPHONE || TARGET_OS_OSX
   FlutterRTCVideoPlatformViewFactory *_platformViewFactory;
 #endif
@@ -1825,6 +1827,14 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
           }
         });
       });
+    } else if ([@"setMicGain" isEqualToString:call.method]) {
+      NSNumber* gain = call.arguments[@"gain"];
+      [self captureProcessor].gain =
+          [gain isKindOfClass:[NSNumber class]] ? gain.floatValue : 1.0f;
+      result(@(YES));
+    } else if ([@"setRnnoiseEnabled" isEqualToString:call.method]) {
+      // RNNoise вендорится только в Windows- и Linux-сборках.
+      result(@(NO));
     } else {
       if([self handleFrameCryptorMethodCall:call result:result]) {
           return;
@@ -1832,6 +1842,16 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
           [self handleDataPacketCryptorMethodCall:call result:result];
       }
     }
+}
+
+// Процессор цепляем лениво: пока усиление не трогали, лишнего прохода по
+// кадру захвата нет.
+- (SqueakCaptureProcessor*)captureProcessor {
+  if (_captureProcessor == nil) {
+    _captureProcessor = [[SqueakCaptureProcessor alloc] init];
+    [AudioManager.sharedInstance.capturePostProcessingAdapter addProcessing:_captureProcessor];
+  }
+  return _captureProcessor;
 }
 
 - (void)dealloc {
