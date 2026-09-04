@@ -174,6 +174,8 @@ void FlutterScreenCapture::GetDisplayMedia(
   std::string source_id = "0";
   // DesktopType source_type = kScreen;
   double fps = 30.0;
+  int target_width = 0;
+  int target_height = 0;
 
   const EncodableMap video = findMap(constraints, "video");
   if (video != EncodableMap()) {
@@ -195,6 +197,12 @@ void FlutterScreenCapture::GetDisplayMedia(
         fps = frameRate;
       }
     }
+    // Запрошенный размер кадра. Захват экрана его исторически игнорировал и
+    // всегда отдавал нативное разрешение, а масштабировали уже потом, на
+    // процессоре. Теперь габарит уезжает в capturer: 1080p с 4K-экрана — это
+    // 186 МБ/с обратного чтения вместо 746.
+    target_width = findInt(video, "width");
+    target_height = findInt(video, "height");
   }
 
   std::string uuid = base_->GenerateUUID();
@@ -352,6 +360,10 @@ void FlutterScreenCapture::GetDisplayMedia(
   base_->local_tracks_[track->id().std_string()] = track;
 
   base_->local_streams_[uuid] = stream;
+
+  if (target_width > 0 && target_height > 0) {
+    desktop_capturer->SetOutputSize(target_width, target_height);
+  }
 
   desktop_capturer->Start(uint32_t(fps));
 
