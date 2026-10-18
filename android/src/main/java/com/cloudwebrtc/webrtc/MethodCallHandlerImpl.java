@@ -15,6 +15,7 @@ import android.media.AudioDeviceInfo;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 import android.util.LongSparseArray;
 import android.view.Surface;
@@ -111,7 +112,9 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
   private final BinaryMessenger messenger;
   private final Context context;
   private final TextureRegistry textures;
-  private PeerConnectionFactory mFactory;
+  // Written last on the executor by initialize(): the volatile write publishes
+  // every field initialize() set before it.
+  private volatile PeerConnectionFactory mFactory;
   private final Map<String, MediaStream> localStreams = new HashMap<>();
   private final Map<String, LocalTrack> localTracks = new HashMap<>();
   private final LongSparseArray<FlutterRTCVideoRenderer> renders = new LongSparseArray<>();
@@ -215,11 +218,13 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
       return;
     }
 
+    final long started = SystemClock.elapsedRealtime();
     PeerConnectionFactory.initialize(
             InitializationOptions.builder(context)
                     .setEnableInternalTracer(true)
                     .setInjectableLogger(logSink, logSeverity)
                     .createInitializationOptions());
+    final long libReady = SystemClock.elapsedRealtime();
 
     getUserMediaImpl = new GetUserMediaImpl(this, context);
 
@@ -334,6 +339,7 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
 
 
     getUserMediaImpl.audioDeviceModule = (JavaAudioDeviceModule) audioDeviceModule;
+    final long admReady = SystemClock.elapsedRealtime();
 
     final Options options = new Options();
     options.networkIgnoreMask = networkIgnoreMask;
@@ -343,6 +349,7 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
 
     // Initialize EGL contexts required for HW acceleration.
     EglBase.Context eglContext = EglUtils.getRootEglBaseContext();
+    final long eglReady = SystemClock.elapsedRealtime();
 
     videoEncoderFactory = new CustomVideoEncoderFactory(eglContext, true, true);
     videoDecoderFactory = new CustomVideoDecoderFactory(eglContext);
@@ -363,7 +370,10 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     mFactory = factoryBuilder
             .setAudioDeviceModule(audioDeviceModule)
             .createPeerConnectionFactory();
-
+    final long done = SystemClock.elapsedRealtime();
+    Log.i(TAG, "initialize: " + (done - started) + " ms (lib " + (libReady - started)
+            + ", adm " + (admReady - libReady) + ", egl " + (eglReady - admReady)
+            + ", pcf " + (done - eglReady) + ") on " + Thread.currentThread().getName());
   }
 
   @Override
@@ -459,8 +469,30 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
           audioOutputSampleRate = constraintsMap.getInt("audioOutputSampleRate");
         }
 
-        initialize(enableBypassVoiceProcessing, androidUseHardwareAudioProcessing, networkIgnoreMask, forceSWCodec, forceSWCodecList, androidAudioConfiguration, logSeverity, audioSampleRate, audioOutputSampleRate);
-        result.success(null);
+        if (mFactory != null) {
+          result.success(null);
+          break;
+        }
+        // Building the factory takes a second and more on a phone, and since
+        // Flutter 3.29 the platform thread is the UI thread: frames and input
+        // stalled for that long. Nothing in initialize() needs the main thread,
+        // and the Dart side awaits this result before any other call.
+        final boolean bypass = enableBypassVoiceProcessing;
+        final boolean hwProcessing = androidUseHardwareAudioProcessing;
+        final int ignoreMask = networkIgnoreMask;
+        final boolean swCodec = forceSWCodec;
+        final ConstraintsMap audioConfig = androidAudioConfiguration;
+        final Severity severity = logSeverity;
+        final Integer sampleRate = audioSampleRate;
+        final Integer outputSampleRate = audioOutputSampleRate;
+        executor.execute(() -> {
+          try {
+            initialize(bypass, hwProcessing, ignoreMask, swCodec, forceSWCodecList, audioConfig, severity, sampleRate, outputSampleRate);
+            result.success(null);
+          } catch (Throwable t) {
+            resultError("initialize", t.toString(), result);
+          }
+        });
         break;
       }
       case "createPeerConnection": {
