@@ -2,6 +2,12 @@
 
 #include <algorithm>
 
+#if defined(_WINDOWS)
+#include <dxgi.h>
+
+#include "libwebrtc.h"
+#endif
+
 namespace flutter_webrtc_plugin {
 
 FlutterVideoRenderer::~FlutterVideoRenderer() {}
@@ -35,13 +41,13 @@ const FlutterDesktopPixelBuffer* FlutterVideoRenderer::CopyPixelBuffer(
       // Пропорции держим сами и никогда не увеличиваем: виджет масштабирует
       // текстуру исходя из videoWidth/videoHeight, и непропорциональный ужим
       // дал бы искажение картинки.
-      const double scale = std::min(
+      const double scale = (std::min)(
           {1.0, static_cast<double>(width) / target_width,
            static_cast<double>(height) / target_height});
       if (scale < 1.0) {
-        target_width = std::max(2, static_cast<int>(target_width * scale) & ~1);
+        target_width = (std::max)(2, static_cast<int>(target_width * scale) & ~1);
         target_height =
-            std::max(2, static_cast<int>(target_height * scale) & ~1);
+            (std::max)(2, static_cast<int>(target_height * scale) & ~1);
       }
     }
 
@@ -65,6 +71,104 @@ const FlutterDesktopPixelBuffer* FlutterVideoRenderer::CopyPixelBuffer(
   mutex_.unlock();
   return nullptr;
 }
+
+#if defined(_WINDOWS)
+
+bool FlutterVideoRenderer::GpuTexturesAvailable() {
+  return LibWebRTC::GetD3D11Device() != nullptr;
+}
+
+bool FlutterVideoRenderer::EnsureGpuSurface(GpuSurface* surface, size_t width,
+                                            size_t height) {
+  if (surface->texture != nullptr && surface->width == width &&
+      surface->height == height) {
+    return true;
+  }
+  auto* device = static_cast<ID3D11Device*>(LibWebRTC::GetD3D11Device());
+  if (device == nullptr) return false;
+
+  surface->texture.Reset();
+  surface->handle = nullptr;
+  D3D11_TEXTURE2D_DESC desc = {};
+  desc.Width = static_cast<UINT>(width);
+  desc.Height = static_cast<UINT>(height);
+  desc.MipLevels = 1;
+  desc.ArraySize = 1;
+  desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+  desc.SampleDesc.Count = 1;
+  desc.Usage = D3D11_USAGE_DEFAULT;
+  desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+  // Общий ресурс: движок открывает его на своём устройстве по хэндлу.
+  desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
+  if (FAILED(device->CreateTexture2D(&desc, nullptr, &surface->texture))) {
+    return false;
+  }
+  Microsoft::WRL::ComPtr<IDXGIResource> resource;
+  if (FAILED(surface->texture.As(&resource)) ||
+      FAILED(resource->GetSharedHandle(&surface->handle))) {
+    surface->texture.Reset();
+    return false;
+  }
+  surface->width = width;
+  surface->height = height;
+  surface->descriptor = {};
+  surface->descriptor.struct_size = sizeof(FlutterDesktopGpuSurfaceDescriptor);
+  surface->descriptor.handle = surface->handle;
+  surface->descriptor.width = width;
+  surface->descriptor.height = height;
+  surface->descriptor.visible_width = width;
+  surface->descriptor.visible_height = height;
+  surface->descriptor.format = kFlutterDesktopPixelFormatBGRA8888;
+  surface->descriptor.release_callback = nullptr;
+  surface->descriptor.release_context = nullptr;
+  return true;
+}
+
+// Под mutex_. Кадр рисуется в задний буфер, после чего он становится передним.
+bool FlutterVideoRenderer::RenderToGpuSurface(
+    const scoped_refptr<RTCVideoFrame>& frame) {
+  // Текстура в размер кадра, не плитки: движок масштабирует сам, а плитка
+  // меняет размер при каждой перестановке сетки — пересоздавать текстуру под
+  // неё было бы дороже, чем сэмплировать большую.
+  int width = frame->width();
+  int height = frame->height();
+  const int rotation = frame->rotation();
+  if (rotation == RTCVideoFrame::kVideoRotation_90 ||
+      rotation == RTCVideoFrame::kVideoRotation_270) {
+    // Поворот видеокарта в этом пути не делает — такие кадры (камера
+    // телефона) идут через процессор.
+    return false;
+  }
+  if (width <= 0 || height <= 0) return false;
+
+  const int back = gpu_front_ < 0 ? 0 : 1 - gpu_front_;
+  GpuSurface& surface = gpu_surfaces_[back];
+  if (!EnsureGpuSurface(&surface, static_cast<size_t>(width),
+                        static_cast<size_t>(height))) {
+    return false;
+  }
+  if (!frame->RenderToD3D11Texture(surface.texture.Get(), 0, 0, width,
+                                   height)) {
+    return false;
+  }
+  // Движок читает текстуру на другом устройстве: команды должны уйти на
+  // видеокарту до того, как он возьмёт хэндл.
+  auto* device = static_cast<ID3D11Device*>(LibWebRTC::GetD3D11Device());
+  Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
+  device->GetImmediateContext(&context);
+  context->Flush();
+  gpu_front_ = back;
+  return true;
+}
+
+const FlutterDesktopGpuSurfaceDescriptor* FlutterVideoRenderer::ObtainGpuSurface(
+    size_t /* width */, size_t /* height */) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (gpu_front_ < 0) return nullptr;
+  return &gpu_surfaces_[gpu_front_].descriptor;
+}
+
+#endif  // _WINDOWS
 
 void FlutterVideoRenderer::OnFrame(scoped_refptr<RTCVideoFrame> frame) {
   if (!first_frame_rendered) {
@@ -97,6 +201,16 @@ void FlutterVideoRenderer::OnFrame(scoped_refptr<RTCVideoFrame> frame) {
 
     last_frame_size_ = {(size_t)frame->width(), (size_t)frame->height()};
   }
+#if defined(_WINDOWS)
+  if (gpu_path_) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!RenderToGpuSurface(frame)) return;
+    }
+    registrar_->MarkTextureFrameAvailable(texture_id_);
+    return;
+  }
+#endif
   mutex_.lock();
   frame_ = frame;
   mutex_.unlock();
@@ -136,12 +250,27 @@ FlutterVideoRendererManager::FlutterVideoRendererManager(
 void FlutterVideoRendererManager::CreateVideoRendererTexture(
     std::unique_ptr<MethodResultProxy> result) {
   auto texture = new RefCountedObject<FlutterVideoRenderer>();
-  auto textureVariant =
-      std::make_unique<flutter::TextureVariant>(flutter::PixelBufferTexture(
-          [texture](size_t width,
-                    size_t height) -> const FlutterDesktopPixelBuffer* {
-            return texture->CopyPixelBuffer(width, height);
-          }));
+  std::unique_ptr<flutter::TextureVariant> textureVariant;
+#if defined(_WINDOWS)
+  if (FlutterVideoRenderer::GpuTexturesAvailable()) {
+    textureVariant = std::make_unique<flutter::TextureVariant>(
+        flutter::GpuSurfaceTexture(
+            kFlutterDesktopGpuSurfaceTypeDxgiSharedHandle,
+            [texture](size_t width, size_t height)
+                -> const FlutterDesktopGpuSurfaceDescriptor* {
+              return texture->ObtainGpuSurface(width, height);
+            }));
+    texture->EnableGpuPath();
+  }
+#endif
+  if (!textureVariant) {
+    textureVariant =
+        std::make_unique<flutter::TextureVariant>(flutter::PixelBufferTexture(
+            [texture](size_t width,
+                      size_t height) -> const FlutterDesktopPixelBuffer* {
+              return texture->CopyPixelBuffer(width, height);
+            }));
+  }
 
   auto texture_id = base_->textures_->RegisterTexture(textureVariant.get());
   texture->initialize(base_->textures_, base_->messenger_, base_->task_runner_,

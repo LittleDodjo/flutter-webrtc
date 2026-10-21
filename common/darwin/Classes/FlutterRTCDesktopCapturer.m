@@ -101,6 +101,8 @@ NSArray<RTCDesktopSource*>* _captureSources;
   NSString* sourceId = nil;
   BOOL useDefaultScreen = NO;
   NSInteger fps = 30;
+  NSInteger targetWidth = 0;
+  NSInteger targetHeight = 0;
   id videoConstraints = constraints[@"video"];
   if ([videoConstraints isKindOfClass:[NSNumber class]] && [videoConstraints boolValue] == YES) {
     useDefaultScreen = YES;
@@ -124,6 +126,15 @@ NSArray<RTCDesktopSource*>* _captureSources;
       if (frameRate != nil && [frameRate isKindOfClass:[NSNumber class]]) {
         fps = [frameRate integerValue];
       }
+    }
+    // Запрошенный размер кадра (VideoParameters.dimensions из livekit).
+    // Раньше игнорировался: экран захватывался целиком, а ужимал его webrtc
+    // на процессоре. Теперь габарит уезжает в ScreenCaptureKit.
+    id width = videoConstraints[@"width"];
+    id height = videoConstraints[@"height"];
+    if ([width isKindOfClass:[NSNumber class]] && [height isKindOfClass:[NSNumber class]]) {
+      targetWidth = [width integerValue];
+      targetHeight = [height integerValue];
     }
   }
   RTCDesktopCapturer* desktopCapturer;
@@ -154,6 +165,8 @@ NSArray<RTCDesktopSource*>* _captureSources;
       screenCaptureKitCapturer =
           [[FlutterScreenCaptureKitCapturer alloc] initWithDelegate:videoProcessingAdapter];
       [screenCaptureKitCapturer startCaptureWithFPS:fps
+                                        targetWidth:targetWidth
+                                       targetHeight:targetHeight
                                            sourceId:sourceId
                                           onStarted:^(NSError * _Nullable error) {
                                             if (error != nil) {

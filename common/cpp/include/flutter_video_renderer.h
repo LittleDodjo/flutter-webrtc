@@ -9,6 +9,11 @@
 
 #include <mutex>
 
+#if defined(_WINDOWS)
+#include <d3d11.h>
+#include <wrl/client.h>
+#endif
+
 namespace flutter_webrtc_plugin {
 
 using namespace libwebrtc;
@@ -29,6 +34,16 @@ class FlutterVideoRenderer
   virtual const FlutterDesktopPixelBuffer* CopyPixelBuffer(size_t width,
                                                            size_t height) const;
 
+#if defined(_WINDOWS)
+  // Текстурный путь: кадр из видеопамяти рисуется видеокартой в общую
+  // BGRA-текстуру, которую движок Flutter открывает по DXGI-хэндлу. Пиксели
+  // через процессор не ходят вовсе.
+  const FlutterDesktopGpuSurfaceDescriptor* ObtainGpuSurface(size_t width,
+                                                             size_t height);
+  void EnableGpuPath() { gpu_path_ = true; }
+  static bool GpuTexturesAvailable();
+#endif
+
   virtual void OnFrame(scoped_refptr<RTCVideoFrame> frame) override;
 
   void SetVideoTrack(scoped_refptr<RTCVideoTrack> track);
@@ -46,6 +61,22 @@ class FlutterVideoRenderer
     size_t width;
     size_t height;
   };
+#if defined(_WINDOWS)
+  // Два буфера: пока движок читает один, следующий кадр ложится в другой.
+  struct GpuSurface {
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+    HANDLE handle = nullptr;
+    size_t width = 0;
+    size_t height = 0;
+    FlutterDesktopGpuSurfaceDescriptor descriptor = {};
+  };
+  bool RenderToGpuSurface(const scoped_refptr<RTCVideoFrame>& frame);
+  bool EnsureGpuSurface(GpuSurface* surface, size_t width, size_t height);
+
+  GpuSurface gpu_surfaces_[2];
+  int gpu_front_ = -1;
+  bool gpu_path_ = false;
+#endif
   FrameSize last_frame_size_ = {0, 0};
   bool first_frame_rendered = false;
   TextureRegistrar* registrar_ = nullptr;

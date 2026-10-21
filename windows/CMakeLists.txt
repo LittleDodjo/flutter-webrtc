@@ -73,6 +73,8 @@ target_link_libraries(${PLUGIN_NAME} PRIVATE
   flutter_wrapper_plugin
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/lib/libwebrtc.dll.lib"
   avrt.lib
+  d3d11.lib
+  dxgi.lib
   ksuser.lib
   mmdevapi.lib
   ole32.lib

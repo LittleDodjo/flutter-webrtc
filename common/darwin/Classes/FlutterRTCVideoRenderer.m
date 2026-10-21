@@ -2,6 +2,7 @@
 
 #import <AVFoundation/AVFoundation.h>
 #import <CoreGraphics/CGImage.h>
+#import <WebRTC/RTCCVPixelBuffer.h>
 #import <WebRTC/RTCYUVHelper.h>
 #import <WebRTC/RTCYUVPlanarBuffer.h>
 #import <WebRTC/WebRTC.h>
@@ -15,6 +16,8 @@
   CGSize _frameSize;
   CGSize _renderSize;
   CVPixelBufferRef _pixelBufferRef;
+  // true — _pixelBufferRef наш BGRA (запасной путь); false — буфер декодера.
+  bool _ownsPixelBuffer;
   RTCVideoRotation _rotation;
   FlutterEventChannel* _eventChannel;
   bool _isFirstFrameRendered;
@@ -39,6 +42,7 @@
     _rotation = -1;
     _registry = registry;
     _pixelBufferRef = nil;
+    _ownsPixelBuffer = false;
     _eventSink = nil;
     _rotation = -1;
     _textureId = [registry registerTexture:self];
@@ -190,6 +194,29 @@
   CVPixelBufferUnlockBaseAddress(outputPixelBuffer, 0);
 }
 
+// Кадр из VideoToolbox (и из ScreenCaptureKit у своего превью) приходит как
+// CVPixelBuffer на IOSurface в NV12 — ровно то, что Flutter macOS умеет класть
+// в Metal-текстуру напрямую. Отдаём его как есть: ни toI420, ни I420ToARGB,
+// ни копии на процессоре. Для 4K60 это минус ~1.5 ГБ/с трафика памяти на
+// главном потоке приёма — те самые фризы на весь экран.
+- (CVPixelBufferRef)zeroCopyBufferFromFrame:(RTCVideoFrame*)frame {
+  if (frame.rotation != RTCVideoRotation_0) return NULL;
+  if (![frame.buffer isKindOfClass:[RTCCVPixelBuffer class]]) return NULL;
+  RTCCVPixelBuffer* cv = (RTCCVPixelBuffer*)frame.buffer;
+  if ([cv requiresCropping]) return NULL;
+  CVPixelBufferRef pixelBuffer = cv.pixelBuffer;
+  if (pixelBuffer == NULL) return NULL;
+  // Движок открывает буфер как IOSurface; без неё текстуру не собрать.
+  if (CVPixelBufferGetIOSurface(pixelBuffer) == NULL) return NULL;
+  const OSType format = CVPixelBufferGetPixelFormatType(pixelBuffer);
+  if (format != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange &&
+      format != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange &&
+      format != kCVPixelFormatType_32BGRA) {
+    return NULL;
+  }
+  return pixelBuffer;
+}
+
 #pragma mark - RTCVideoRenderer methods
 - (void)renderFrame:(RTCVideoFrame*)frame {
 
@@ -198,12 +225,32 @@
     os_unfair_lock_unlock(&_lock);
     return;
   }
-  if(!_frameAvailable && _pixelBufferRef) {
-    [self copyI420ToCVPixelBuffer:_pixelBufferRef withFrame:frame];
+  CVPixelBufferRef direct = [self zeroCopyBufferFromFrame:frame];
+  if (direct != NULL) {
+    // Всегда подменяем на свежий кадр: Flutter заберёт самый последний на
+    // своём vsync, а не отстающий на кадр.
+    CVPixelBufferRef previous = _pixelBufferRef;
+    _pixelBufferRef = CVPixelBufferRetain(direct);
+    _ownsPixelBuffer = false;
+    if (previous != NULL) CVPixelBufferRelease(previous);
+    _frameAvailable = true;
     if(_textureId != -1) {
       [_registry textureFrameAvailable:_textureId];
     }
-    _frameAvailable = true;
+  } else {
+    // Запасной путь: свой буфер BGRA, конвертация на процессоре.
+    if (!_ownsPixelBuffer || _pixelBufferRef == NULL ||
+        CVPixelBufferGetWidth(_pixelBufferRef) != (size_t)_frameSize.width ||
+        CVPixelBufferGetHeight(_pixelBufferRef) != (size_t)_frameSize.height) {
+      [self allocateOwnBufferLocked];
+    }
+    if(!_frameAvailable && _pixelBufferRef) {
+      [self copyI420ToCVPixelBuffer:_pixelBufferRef withFrame:frame];
+      if(_textureId != -1) {
+        [_registry textureFrameAvailable:_textureId];
+      }
+      _frameAvailable = true;
+    }
   }
   os_unfair_lock_unlock(&_lock);
 
@@ -255,17 +302,28 @@
  *
  * @param size The size of the video frame to render.
  */
+// Под _lock. Свой BGRA-буфер под размер кадра для запасного пути.
+- (void)allocateOwnBufferLocked {
+  if (_pixelBufferRef) {
+    CVBufferRelease(_pixelBufferRef);
+    _pixelBufferRef = NULL;
+  }
+  if (_frameSize.width <= 0 || _frameSize.height <= 0) return;
+  NSDictionary* pixelAttributes = @{(id)kCVPixelBufferIOSurfacePropertiesKey : @{}};
+  CVPixelBufferCreate(kCFAllocatorDefault, _frameSize.width, _frameSize.height,
+                      kCVPixelFormatType_32BGRA, (__bridge CFDictionaryRef)(pixelAttributes),
+                      &_pixelBufferRef);
+  _ownsPixelBuffer = true;
+  _frameAvailable = false;
+}
+
 - (void)setSize:(CGSize)size {
   os_unfair_lock_lock(&_lock);
   if (size.width != _frameSize.width || size.height != _frameSize.height) {
-    if (_pixelBufferRef) {
-      CVBufferRelease(_pixelBufferRef);
-    }
-    NSDictionary* pixelAttributes = @{(id)kCVPixelBufferIOSurfacePropertiesKey : @{}};
-    CVPixelBufferCreate(kCFAllocatorDefault, size.width, size.height, kCVPixelFormatType_32BGRA,
-                        (__bridge CFDictionaryRef)(pixelAttributes), &_pixelBufferRef);
-    _frameAvailable = false;
     _frameSize = size;
+    // Буфер под новый размер заведём на первом кадре: на zero-copy пути он
+    // не нужен вовсе.
+    if (_ownsPixelBuffer) [self allocateOwnBufferLocked];
   }
   os_unfair_lock_unlock(&_lock);
 }
