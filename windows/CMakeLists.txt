@@ -31,6 +31,7 @@ add_library(${PLUGIN_NAME} SHARED
   "../common/cpp/src/flutter_webrtc.cc"
   "../common/cpp/src/flutter_webrtc_base.cc"
   "../common/cpp/src/squeak_capture_processor.cc"
+  "../common/cpp/src/squeak_deep_filter.cc"
   "../third_party/rnnoise/src/celt_lpc.c"
   "../third_party/rnnoise/src/denoise.c"
   "../third_party/rnnoise/src/kiss_fft.c"
@@ -86,5 +87,6 @@ target_link_libraries(${PLUGIN_NAME} PRIVATE
 # List of absolute paths to libraries that should be bundled with the plugin
 set(flutter_webrtc_bundled_libraries
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/lib/libwebrtc.dll"
+  ${SQUEAK_DF_LIBRARY}
   PARENT_SCOPE
 )

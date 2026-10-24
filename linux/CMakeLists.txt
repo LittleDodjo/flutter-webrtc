@@ -39,6 +39,7 @@ add_library(${PLUGIN_NAME} SHARED
   "../common/cpp/src/flutter_webrtc.cc"
   "../common/cpp/src/flutter_webrtc_base.cc"
   "../common/cpp/src/squeak_capture_processor.cc"
+  "../common/cpp/src/squeak_deep_filter.cc"
   ${RNNOISE_SOURCES}
   "../common/cpp/src/flutter_common.cc"
   "loopback_capturer_factory.cc"
@@ -75,6 +76,8 @@ target_include_directories(${PLUGIN_NAME} INTERFACE
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/include"
 )
 target_link_libraries(${PLUGIN_NAME} PRIVATE flutter)
+# dlopen для DeepFilterNet3 (squeak_deep_filter.cc).
+target_link_libraries(${PLUGIN_NAME} PRIVATE ${CMAKE_DL_LIBS})
 target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::GTK)
 
 # GCC 14+ (and notably GCC 16) tightened transitive header inclusion, so the
@@ -130,6 +133,7 @@ target_link_libraries(${PLUGIN_NAME} PRIVATE
 # List of absolute paths to libraries that should be bundled with the plugin
 set(flutter_webrtc_bundled_libraries
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/lib/libwebrtc.so"
+  ${SQUEAK_DF_LIBRARY}
   PARENT_SCOPE
 )
 

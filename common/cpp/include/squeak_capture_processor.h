@@ -6,12 +6,18 @@
 #include <memory>
 
 #include "rtc_audio_processing.h"
+#include "squeak_deep_filter.h"
 
 namespace flutter_webrtc_plugin {
 
 // Наша врезка в цепочку захвата, сразу за штатным APM (после его шумодава,
 // эхоподавителя и AGC2 — отдельного места «до APM» у постпроцессора нет). Делает две вещи:
-// нейросетевой шумодав Xiph RNNoise и усиление микрофона.
+// нейросетевой шумодав и усиление микрофона.
+//
+// Шумодав — DeepFilterNet3, если его библиотека рядом и модель поднялась, иначе
+// Xiph RNNoise с гейтом. На речи поверх механической клавиатуры DFN3 оставляет
+// в паузах −71 dBFS против −48 у RNNoise с гейтом, а речь портит меньше
+// (SI-SDR 19 дБ против 14); цена — 30 мс задержки вместо 10 и ~0,6 мс на кадр.
 //
 // Усиление живёт именно здесь, потому что штатного пути нет: SetVolume на
 // локальном треке уходит в LocalAudioSource::SetVolume, а он в libwebrtc
@@ -21,7 +27,8 @@ namespace flutter_webrtc_plugin {
 // Порядок: сначала шумодав, потом гейт, потом усиление. Наоборот сеть увидела
 // бы уже задранный фон.
 //
-// Гейт закрывает кадры, где RNNoise не слышит голоса. Сам RNNoise короткие
+// Гейт — только для RNNoise: DFN3 щелчки в паузах убирает сам. Он закрывает
+// кадры, где RNNoise не слышит голоса. Сам RNNoise короткие
 // щелчки (клавиатура, мышь) только приглушает: модель обучена на стационарном
 // шуме, а щелчок для неё похож на согласную. Зато его вероятность голоса на
 // таких кадрах низкая, и в паузах между словами щелчки уходят целиком.
@@ -37,12 +44,19 @@ class SqueakCaptureProcessor
     int64_t denoised = 0;
     int64_t gated = 0;
     double vad_mean = 0;
+    SqueakDeepFilter::Status deep_filter = SqueakDeepFilter::Status::kIdle;
+    // Кадры через DFN3 (входят и в denoised) и их средний локальный SNR, дБ.
+    int64_t deep_filtered = 0;
+    double lsnr_mean = 0;
   };
 
   SqueakCaptureProcessor();
   ~SqueakCaptureProcessor() override;
 
-  void SetRnnoiseEnabled(bool enabled) { rnnoise_enabled_.store(enabled); }
+  void SetRnnoiseEnabled(bool enabled) {
+    if (enabled) deep_filter_.Prepare();
+    rnnoise_enabled_.store(enabled);
+  }
 
   // Снимает счётчики и обнуляет их. Читатель один — периодическая строка
   // статистики звука в клиенте.
@@ -63,7 +77,7 @@ class SqueakCaptureProcessor
  private:
   struct State;
 
-  // RNNoise работает только на 48 кГц кадрами по 480 сэмплов. На другой
+  // Оба шумодава работают только на 48 кГц кадрами по 480 сэмплов. На другой
   // частоте шумодав пропускаем, а усиление применяем всё равно.
   bool RnnoiseApplicable(int num_frames) const;
 
@@ -86,6 +100,10 @@ class SqueakCaptureProcessor
   std::atomic<int64_t> stat_gated_{0};
   // Сумма вероятностей голоса в тысячных: атомарного double нет.
   std::atomic<int64_t> stat_vad_milli_{0};
+  std::atomic<int64_t> stat_deep_filtered_{0};
+  std::atomic<int64_t> stat_lsnr_milli_{0};
+
+  SqueakDeepFilter deep_filter_;
 
   std::atomic<float> gain_{1.0f};
 

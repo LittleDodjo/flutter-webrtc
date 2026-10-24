@@ -1340,6 +1340,17 @@ void FlutterWebRTC::HandleMethodCall(
     map[EncodableValue("denoised")] = EncodableValue(stats.denoised);
     map[EncodableValue("gated")] = EncodableValue(stats.gated);
     map[EncodableValue("vad")] = EncodableValue(stats.vad_mean);
+    map[EncodableValue("deepFiltered")] = EncodableValue(stats.deep_filtered);
+    map[EncodableValue("lsnr")] = EncodableValue(stats.lsnr_mean);
+    const char* dfn = "idle";
+    switch (stats.deep_filter) {
+      case SqueakDeepFilter::Status::kIdle: dfn = "idle"; break;
+      case SqueakDeepFilter::Status::kLoading: dfn = "loading"; break;
+      case SqueakDeepFilter::Status::kReady: dfn = "ready"; break;
+      case SqueakDeepFilter::Status::kMissing: dfn = "missing"; break;
+      case SqueakDeepFilter::Status::kFailed: dfn = "failed"; break;
+    }
+    map[EncodableValue("dfn")] = EncodableValue(std::string(dfn));
     result->Success(EncodableValue(map));
 #else
     result->Success();

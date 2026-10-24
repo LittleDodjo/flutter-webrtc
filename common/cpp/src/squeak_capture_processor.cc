@@ -78,8 +78,13 @@ SqueakCaptureProcessor::Stats SqueakCaptureProcessor::TakeStats() {
   stats.denoised = stat_denoised_.exchange(0);
   stats.gated = stat_gated_.exchange(0);
   const int64_t vad_milli = stat_vad_milli_.exchange(0);
-  if (stats.denoised > 0) {
-    stats.vad_mean = vad_milli / 1000.0 / stats.denoised;
+  stats.deep_filter = deep_filter_.status();
+  stats.deep_filtered = stat_deep_filtered_.exchange(0);
+  const int64_t lsnr_milli = stat_lsnr_milli_.exchange(0);
+  const int64_t rnnoised = stats.denoised - stats.deep_filtered;
+  if (rnnoised > 0) stats.vad_mean = vad_milli / 1000.0 / rnnoised;
+  if (stats.deep_filtered > 0) {
+    stats.lsnr_mean = lsnr_milli / 1000.0 / stats.deep_filtered;
   }
   return stats;
 }
@@ -124,7 +129,14 @@ void SqueakCaptureProcessor::Process(int num_bands, int num_frames,
 
   stat_frames_.fetch_add(1);
 
+  float lsnr = 0;
   if (!rnnoise_enabled_.load()) {
+    ResetGate();
+  } else if (RnnoiseApplicable(num_frames) &&
+             deep_filter_.Process(buffer, &lsnr)) {
+    stat_denoised_.fetch_add(1);
+    stat_deep_filtered_.fetch_add(1);
+    stat_lsnr_milli_.fetch_add(static_cast<int64_t>(lsnr * 1000.0f));
     ResetGate();
   } else if (state_ != nullptr && state_->denoiser != nullptr) {
     if (RnnoiseApplicable(num_frames)) {
