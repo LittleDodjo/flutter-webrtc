@@ -172,6 +172,10 @@ EncodableMap rtpParametersToMap(
   for (scoped_refptr<libwebrtc::RTCRtpEncodingParameters> encoding :
        encodings.std_vector()) {
     EncodableMap map;
+    // Без rid слои симулкаста неотличимы: dynacast livekit сопоставляет их
+    // именно по rid и без него включал и гасил все слои разом.
+    const std::string rid = encoding->rid().std_string();
+    if (!rid.empty()) map[EncodableValue("rid")] = EncodableValue(rid);
     map[EncodableValue("active")] = EncodableValue(encoding->active());
     map[EncodableValue("maxBitrate")] =
         EncodableValue(encoding->max_bitrate_bps());
