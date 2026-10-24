@@ -1,0 +1,23 @@
+[package]
+name = "squeak_df"
+version = "1.0.0"
+edition = "2021"
+publish = false
+description = "DeepFilterNet3 для захвата микрофона Squeak: модель вшита, паники не выходят за FFI"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "squeak_df"
+crate-type = ["cdylib"]
+
+[dependencies]
+# Ревизия закреплена: модель DFN3 берётся из этого же дерева (include_bytes).
+deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", rev = "d375b2d8309e0935d165700c91da9de862a99c31", default-features = false, features = ["tract", "default-model"] }
+ndarray = "0.15"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "unwind"
+strip = true

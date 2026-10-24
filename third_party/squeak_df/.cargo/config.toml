@@ -1,0 +1,3 @@
+[target.x86_64-pc-windows-msvc]
+# Без зависимости от VCRUNTIME140.dll у пользователя.
+rustflags = ["-C", "target-feature=+crt-static"]

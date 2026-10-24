@@ -34,3 +34,5 @@ build/
 # (CMakeLists.txt, libwebrtc_version.ini, svpng/) is published with the package.
 third_party/downloads/
 third_party/libwebrtc/
+third_party/squeak_df_bin/
+third_party/squeak_df/target/

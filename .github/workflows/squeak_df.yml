@@ -1,0 +1,65 @@
+name: squeak_df
+
+# Шумодав DeepFilterNet3 (third_party/squeak_df) под Windows и Linux. Тег
+# squeak_df-vN собирает библиотеку и выкладывает её в релиз того же тега;
+# плагин берёт её по секции [squeak_df] в third_party/libwebrtc_version.ini.
+
+on:
+  push:
+    tags: ['squeak_df-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            asset: squeak_df-win-x64
+            lib: squeak_df.dll
+          # Старая glibc — чтобы библиотека грузилась и на дистрибутивах постарше.
+          - os: ubuntu-22.04
+            asset: squeak_df-linux-x64
+            lib: libsqueak_df.so
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: third_party/squeak_df
+      - name: Build
+        working-directory: third_party/squeak_df
+        run: cargo build --release --locked
+      - name: Pack
+        shell: bash
+        run: |
+          mkdir pack
+          cp third_party/squeak_df/target/release/${{ matrix.lib }} pack/
+          cd pack && cmake -E tar cf ../${{ matrix.asset }}.zip --format=zip ${{ matrix.lib }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}.zip
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" squeak_df-*.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "DeepFilterNet3 для шумодава захвата, сборка $GITHUB_SHA."
