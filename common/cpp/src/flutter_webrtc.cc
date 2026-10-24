@@ -1322,6 +1322,28 @@ void FlutterWebRTC::HandleMethodCall(
 #else
     result->Success(EncodableValue(false));
 #endif
+  } else if (method_call.method_name().compare("getCaptureProcessorStats") ==
+             0) {
+#if defined(SQUEAK_USE_RNNOISE)
+    // До первого включения шумодава или усиления врезки ещё нет — это тоже
+    // ответ: захват идёт мимо неё.
+    if (!capture_processor_) {
+      result->Success();
+      return;
+    }
+    const SqueakCaptureProcessor::Stats stats =
+        capture_processor_->TakeStats();
+    EncodableMap map;
+    map[EncodableValue("enabled")] = EncodableValue(stats.enabled);
+    map[EncodableValue("sampleRate")] = EncodableValue(stats.sample_rate_hz);
+    map[EncodableValue("frames")] = EncodableValue(stats.frames);
+    map[EncodableValue("denoised")] = EncodableValue(stats.denoised);
+    map[EncodableValue("gated")] = EncodableValue(stats.gated);
+    map[EncodableValue("vad")] = EncodableValue(stats.vad_mean);
+    result->Success(EncodableValue(map));
+#else
+    result->Success();
+#endif
   } else {
     if (HandleFrameCryptorMethodCall(method_call, std::move(result), &result)) {
       return;

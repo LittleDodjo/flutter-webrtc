@@ -20,6 +20,19 @@ constexpr int kRnnoiseRate = 48000;
 // при кодировании, поэтому подрезаем сами.
 constexpr float kSampleMax = 32767.0f;
 
+// Порог вероятности голоса, с которого гейт открыт. В noise-suppression-for-voice
+// (фильтр на RNNoise для OBS и PipeWire) по умолчанию 0,5, но на прогоне речи
+// с щелчками клавиатуры 0,5 съедал атаку слова после паузы (40 мс), а 0,3 —
+// ничего, при том же подавлении щелчков: −39,7 dBFS на входе, −49,8 после
+// одного RNNoise, −65,5 с гейтом.
+constexpr float kVadOpen = 0.3f;
+
+// 200 мс: хвосты слов и короткие паузы внутри фразы гейт не рубит.
+constexpr int kHoldFrames = 20;
+
+// Открытие за 2,5 мс — первую согласную не съедаем; закрытие на весь кадр.
+constexpr int kOpenRampSamples = 120;
+
 }  // namespace
 
 struct SqueakCaptureProcessor::State {
@@ -57,6 +70,46 @@ bool SqueakCaptureProcessor::RnnoiseApplicable(int num_frames) const {
   return num_frames == kRnnoiseFrameSize && sample_rate_hz_ == kRnnoiseRate;
 }
 
+SqueakCaptureProcessor::Stats SqueakCaptureProcessor::TakeStats() {
+  Stats stats;
+  stats.enabled = rnnoise_enabled_.load();
+  stats.sample_rate_hz = sample_rate_hz_;
+  stats.frames = stat_frames_.exchange(0);
+  stats.denoised = stat_denoised_.exchange(0);
+  stats.gated = stat_gated_.exchange(0);
+  const int64_t vad_milli = stat_vad_milli_.exchange(0);
+  if (stats.denoised > 0) {
+    stats.vad_mean = vad_milli / 1000.0 / stats.denoised;
+  }
+  return stats;
+}
+
+void SqueakCaptureProcessor::ResetGate() {
+  hold_frames_ = 0;
+  gate_gain_ = 1.0f;
+}
+
+void SqueakCaptureProcessor::ApplyGate(float vad, int num_frames,
+                                       float* buffer) {
+  if (vad >= kVadOpen) {
+    hold_frames_ = kHoldFrames;
+  } else if (hold_frames_ > 0) {
+    --hold_frames_;
+  }
+
+  const float target = hold_frames_ > 0 ? 1.0f : 0.0f;
+  if (target == 0.0f) stat_gated_.fetch_add(1);
+  if (target == 1.0f && gate_gain_ == 1.0f) return;
+
+  const float from = gate_gain_;
+  const int ramp = target > from ? kOpenRampSamples : num_frames;
+  for (int i = 0; i < num_frames; ++i) {
+    const float k = i < ramp ? static_cast<float>(i + 1) / ramp : 1.0f;
+    buffer[i] *= from + (target - from) * k;
+  }
+  gate_gain_ = target;
+}
+
 void SqueakCaptureProcessor::Process(int num_bands, int num_frames,
                                      int buffer_size, float* buffer) {
   // Постпроцессор APM зовётся после слияния полос, и buffer — это полный
@@ -69,12 +122,19 @@ void SqueakCaptureProcessor::Process(int num_bands, int num_frames,
 
   if (buffer == nullptr || num_frames <= 0) return;
 
-  if (rnnoise_enabled_.load() && state_ != nullptr &&
-      state_->denoiser != nullptr) {
+  stat_frames_.fetch_add(1);
+
+  if (!rnnoise_enabled_.load()) {
+    ResetGate();
+  } else if (state_ != nullptr && state_->denoiser != nullptr) {
     if (RnnoiseApplicable(num_frames)) {
       // Шкала совпадает: APM держит float в диапазоне int16, того же ждёт и
       // RNNoise. Обрабатываем на месте, in и out могут совпадать.
-      rnnoise_process_frame(state_->denoiser, buffer, buffer);
+      const float vad =
+          rnnoise_process_frame(state_->denoiser, buffer, buffer);
+      stat_denoised_.fetch_add(1);
+      stat_vad_milli_.fetch_add(static_cast<int64_t>(vad * 1000.0f));
+      ApplyGate(vad, num_frames, buffer);
     } else if (!warned_) {
       warned_ = true;
       std::fprintf(stderr,
