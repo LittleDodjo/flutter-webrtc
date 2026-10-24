@@ -8,7 +8,8 @@
 
 namespace flutter_webrtc_plugin {
 
-// Наша врезка в цепочку захвата, сразу за штатным APM. Делает две вещи:
+// Наша врезка в цепочку захвата, сразу за штатным APM (после его шумодава,
+// эхоподавителя и AGC2 — отдельного места «до APM» у постпроцессора нет). Делает две вещи:
 // нейросетевой шумодав Xiph RNNoise и усиление микрофона.
 //
 // Усиление живёт именно здесь, потому что штатного пути нет: SetVolume на
@@ -43,7 +44,7 @@ class SqueakCaptureProcessor
 
   // RNNoise работает только на 48 кГц кадрами по 480 сэмплов. На другой
   // частоте шумодав пропускаем, а усиление применяем всё равно.
-  bool RnnoiseApplicable(int num_bands, int num_frames) const;
+  bool RnnoiseApplicable(int num_frames) const;
 
   std::atomic<bool> rnnoise_enabled_{false};
 
