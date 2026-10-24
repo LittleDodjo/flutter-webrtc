@@ -91,3 +91,8 @@ set(flutter_webrtc_bundled_libraries
   ${SQUEAK_DF_LIBRARY}
   PARENT_SCOPE
 )
+
+# Тест врезки на настоящем APM собирается вместе с приложением; CI клиента
+# запускает его на готовом бандле. В установщик не попадает.
+include("${CMAKE_CURRENT_SOURCE_DIR}/../common/cpp/test/squeak_apm_test.cmake")
+squeak_add_apm_test()

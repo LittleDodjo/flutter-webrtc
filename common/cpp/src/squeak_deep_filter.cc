@@ -2,7 +2,9 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
+#include <vector>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -28,14 +30,21 @@ constexpr float kPostFilterBeta = 0.0f;
 
 constexpr float kInt16Scale = 32768.0f;
 
+// Порядок поиска: рядом с нашим модулем (в бандле DLL плагинов лежат у exe),
+// затем каталог из SQUEAK_DF_DIR (тест в дереве сборки), затем системный
+// поиск по имени. [loaded_from] — откуда в итоге взяли.
 #if defined(_WIN32)
 constexpr const wchar_t* kLibraryName = L"squeak_df.dll";
 
-// Рядом с нашим же модулем: Flutter кладёт DLL плагинов к exe, но искать по
-// своему адресу надёжнее, чем по текущему каталогу.
-void* OpenLibrary() {
+std::string Narrow(const std::wstring& wide) {
+  std::string out;
+  for (wchar_t ch : wide) out.push_back(static_cast<char>(ch));
+  return out;
+}
+
+void* OpenLibrary(std::string* loaded_from) {
+  std::vector<std::wstring> candidates;
   HMODULE self = nullptr;
-  std::wstring path = kLibraryName;
   if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                              GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                          reinterpret_cast<LPCWSTR>(&OpenLibrary), &self)) {
@@ -44,10 +53,27 @@ void* OpenLibrary() {
     if (n > 0 && n < MAX_PATH) {
       std::wstring dir(buf, n);
       const size_t slash = dir.find_last_of(L"\\/");
-      if (slash != std::wstring::npos) path = dir.substr(0, slash + 1) + kLibraryName;
+      if (slash != std::wstring::npos) {
+        candidates.push_back(dir.substr(0, slash + 1) + kLibraryName);
+      }
     }
   }
-  return LoadLibraryW(path.c_str());
+  wchar_t env[MAX_PATH];
+  const DWORD env_len = GetEnvironmentVariableW(L"SQUEAK_DF_DIR", env, MAX_PATH);
+  if (env_len > 0 && env_len < MAX_PATH) {
+    candidates.push_back(std::wstring(env, env_len) + L"\\" + kLibraryName);
+  }
+  candidates.push_back(kLibraryName);
+  for (const std::wstring& path : candidates) {
+    HMODULE lib = LoadLibraryW(path.c_str());
+    if (lib == nullptr) continue;
+    wchar_t buf[MAX_PATH];
+    const DWORD n = GetModuleFileNameW(lib, buf, MAX_PATH);
+    *loaded_from = n > 0 && n < MAX_PATH ? Narrow(std::wstring(buf, n))
+                                         : Narrow(path);
+    return lib;
+  }
+  return nullptr;
 }
 
 void* Symbol(void* lib, const char* name) {
@@ -57,18 +83,33 @@ void* Symbol(void* lib, const char* name) {
 #else
 constexpr const char* kLibraryName = "libsqueak_df.so";
 
-// lib/ бандла, где лежит и сам плагин.
-void* OpenLibrary() {
-  std::string path = kLibraryName;
+void* OpenLibrary(std::string* loaded_from) {
+  std::vector<std::string> candidates;
   Dl_info info;
   if (dladdr(reinterpret_cast<void*>(&OpenLibrary), &info) != 0 &&
       info.dli_fname != nullptr) {
     std::string self = info.dli_fname;
     const size_t slash = self.find_last_of('/');
-    if (slash != std::string::npos) path = self.substr(0, slash + 1) + kLibraryName;
+    if (slash != std::string::npos) {
+      candidates.push_back(self.substr(0, slash + 1) + kLibraryName);
+    }
   }
-  void* lib = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
-  return lib != nullptr ? lib : dlopen(kLibraryName, RTLD_NOW | RTLD_LOCAL);
+  if (const char* env = std::getenv("SQUEAK_DF_DIR")) {
+    if (*env != '\0') candidates.push_back(std::string(env) + "/" + kLibraryName);
+  }
+  candidates.push_back(kLibraryName);
+  for (const std::string& path : candidates) {
+    void* lib = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (lib == nullptr) continue;
+    *loaded_from = path;
+    Dl_info loaded;
+    if (dladdr(dlsym(lib, "sqdf_create"), &loaded) != 0 &&
+        loaded.dli_fname != nullptr) {
+      *loaded_from = loaded.dli_fname;
+    }
+    return lib;
+  }
+  return nullptr;
 }
 
 void* Symbol(void* lib, const char* name) { return dlsym(lib, name); }
@@ -90,12 +131,13 @@ void SqueakDeepFilter::Prepare() {
 }
 
 void SqueakDeepFilter::Load() {
-  void* lib = OpenLibrary();
+  void* lib = OpenLibrary(&library_path_);
   if (lib == nullptr) {
     std::fprintf(stderr, "[squeak] dfn3: библиотеки нет, остаётся RNNoise\n");
     status_.store(Status::kMissing);
     return;
   }
+  std::fprintf(stderr, "[squeak] dfn3: загружен %s\n", library_path_.c_str());
   auto create = reinterpret_cast<CreateFn>(Symbol(lib, "sqdf_create"));
   auto frame_length =
       reinterpret_cast<FrameLengthFn>(Symbol(lib, "sqdf_frame_length"));

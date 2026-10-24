@@ -4,6 +4,8 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
+#include <vector>
 
 #include "rtc_audio_processing.h"
 #include "squeak_deep_filter.h"
@@ -49,6 +51,10 @@ class SqueakCaptureProcessor
     // Кадры через DFN3 (входят и в denoised) и их средний локальный SNR, дБ.
     int64_t deep_filtered = 0;
     double lsnr_mean = 0;
+    // Время шумодава на кадр 10 мс: p99 по корзинам (верхняя граница корзины)
+    // и максимум. Кадр дольше 10 мс в потоке захвата — это заикание.
+    int frame_us_p99 = 0;
+    int frame_us_max = 0;
   };
 
   SqueakCaptureProcessor();
@@ -65,6 +71,22 @@ class SqueakCaptureProcessor
 
   // 1.0 — как есть. Ниже — тише, выше — громче, с ограничением по пику.
   void SetGain(float gain) { gain_.store(gain); }
+
+  const SqueakDeepFilter& deep_filter() const { return deep_filter_; }
+
+  // Запись последних [seconds] секунд звука до врезки и после неё, на частоте
+  // кадров APM. Для кнопки «Проверить шумодав»: человек слушает обе записи
+  // на своей машине. Повторный Start сбрасывает буферы.
+  void StartMonitor(int seconds);
+
+  struct MonitorTake {
+    int sample_rate_hz = 0;
+    std::vector<float> before;
+    std::vector<float> after;
+  };
+
+  // Останавливает запись и отдаёт её; пусто, если запись не шла.
+  MonitorTake StopMonitor();
 
   void Initialize(int sample_rate_hz, int num_channels) override;
 
@@ -92,6 +114,24 @@ class SqueakCaptureProcessor
 
   void ResetGate();
 
+  void RecordFrameTime(int64_t us);
+
+  // Кольцевые буферы монитора. Аудиопоток пишет под try_lock: если платформенный
+  // поток как раз забирает запись, кадр пропускается, но поток не ждёт.
+  struct Monitor {
+    int sample_rate_hz = 0;
+    size_t capacity = 0;
+    size_t pos = 0;
+    bool wrapped = false;
+    std::vector<float> before;
+    std::vector<float> after;
+  };
+
+  void MonitorWrite(const float* before, const float* after, int num_frames);
+
+  // Корзины времени кадра, мкс: < 500, < 1000, < 2000, < 4000, < 8000, прочее.
+  static constexpr int kUsBuckets = 6;
+
   std::atomic<bool> rnnoise_enabled_{false};
 
   // Сколько кадров по 10 мс гейт ещё держит открытым после последнего голоса.
@@ -107,6 +147,8 @@ class SqueakCaptureProcessor
   std::atomic<int64_t> stat_vad_milli_{0};
   std::atomic<int64_t> stat_deep_filtered_{0};
   std::atomic<int64_t> stat_lsnr_milli_{0};
+  std::atomic<int64_t> stat_us_bucket_[kUsBuckets] = {};
+  std::atomic<int> stat_us_max_{0};
 
   SqueakDeepFilter deep_filter_;
 
@@ -117,9 +159,17 @@ class SqueakCaptureProcessor
 
   std::atomic<float> gain_{1.0f};
 
+  std::atomic<bool> monitor_on_{false};
+  std::mutex monitor_mutex_;
+  std::unique_ptr<Monitor> monitor_;
+  // Копия входа кадра для монитора; без аллокаций в аудиопотоке.
+  static constexpr int kMonitorFrameMax = 1920;
+  float monitor_input_[kMonitorFrameMax] = {};
+
   std::unique_ptr<State> state_;
 
-  int sample_rate_hz_ = 0;
+  // Пишет аудиопоток, читает TakeStats с платформенного.
+  std::atomic<int> sample_rate_hz_{0};
 
   bool warned_ = false;
 };

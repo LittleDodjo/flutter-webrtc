@@ -1,5 +1,8 @@
 #include "flutter_webrtc.h"
 #include "flutter_data_channel.h"
+#if defined(SQUEAK_USE_RNNOISE)
+#include "squeak_wav.h"
+#endif
 
 #include "flutter_webrtc/flutter_web_r_t_c_plugin.h"
 
@@ -19,7 +22,15 @@ FlutterWebRTC::FlutterWebRTC(FlutterWebRTCPlugin* plugin)
       FlutterFrameCryptor::FlutterFrameCryptor(this),
       FlutterDataPacketCryptor::FlutterDataPacketCryptor(this) {}
 
-FlutterWebRTC::~FlutterWebRTC() {}
+FlutterWebRTC::~FlutterWebRTC() {
+#if defined(SQUEAK_USE_RNNOISE)
+  // Адаптер APM держит сырой указатель на процессор: отвязать до того, как
+  // процессор уничтожен, иначе поток захвата дочитает освобождённую память.
+  if (capture_processor_) {
+    audio_processing()->SetCapturePostProcessing(nullptr);
+  }
+#endif
+}
 
 #if defined(SQUEAK_USE_RNNOISE)
 void FlutterWebRTC::EnsureCaptureProcessor() {
@@ -1297,9 +1308,16 @@ void FlutterWebRTC::HandleMethodCall(
       RTCLoggingSeverity severity = str2LogSeverity(severityStr);
       initLoggerCallback(severity);
     }
+    // Без ответа Future на стороне Dart висел бы вечно.
+    result->Success();
   } else if (method_call.method_name().compare("setRnnoiseEnabled") == 0 ||
              method_call.method_name().compare("setMicGain") == 0) {
 #if defined(SQUEAK_USE_RNNOISE)
+    if (!method_call.arguments() ||
+        !TypeIs<EncodableMap>(*method_call.arguments())) {
+      result->Error("Bad Arguments", "Bad arguments received");
+      return;
+    }
     const EncodableMap params =
         GetValue<EncodableMap>(*method_call.arguments());
 
@@ -1342,6 +1360,8 @@ void FlutterWebRTC::HandleMethodCall(
     map[EncodableValue("vad")] = EncodableValue(stats.vad_mean);
     map[EncodableValue("deepFiltered")] = EncodableValue(stats.deep_filtered);
     map[EncodableValue("lsnr")] = EncodableValue(stats.lsnr_mean);
+    map[EncodableValue("frameUsP99")] = EncodableValue(stats.frame_us_p99);
+    map[EncodableValue("frameUsMax")] = EncodableValue(stats.frame_us_max);
     const char* dfn = "idle";
     switch (stats.deep_filter) {
       case SqueakDeepFilter::Status::kIdle: dfn = "idle"; break;
@@ -1351,6 +1371,54 @@ void FlutterWebRTC::HandleMethodCall(
       case SqueakDeepFilter::Status::kFailed: dfn = "failed"; break;
     }
     map[EncodableValue("dfn")] = EncodableValue(std::string(dfn));
+    result->Success(EncodableValue(map));
+#else
+    result->Success();
+#endif
+  } else if (method_call.method_name().compare("startCaptureMonitor") == 0) {
+#if defined(SQUEAK_USE_RNNOISE)
+    int seconds = 5;
+    if (method_call.arguments() &&
+        TypeIs<EncodableMap>(*method_call.arguments())) {
+      const EncodableMap params =
+          GetValue<EncodableMap>(*method_call.arguments());
+      const int requested = findInt(params, "seconds");
+      if (requested > 0) seconds = requested;
+    }
+    EnsureCaptureProcessor();
+    capture_processor_->StartMonitor(seconds);
+    result->Success(EncodableValue(true));
+#else
+    result->Success(EncodableValue(false));
+#endif
+  } else if (method_call.method_name().compare("stopCaptureMonitor") == 0) {
+#if defined(SQUEAK_USE_RNNOISE)
+    // Две записи — до врезки и после — во временном каталоге: клиент даёт их
+    // послушать и сам удаляет.
+    if (!capture_processor_) {
+      result->Success();
+      return;
+    }
+    const SqueakCaptureProcessor::MonitorTake take =
+        capture_processor_->StopMonitor();
+    if (take.before.empty()) {
+      result->Success();
+      return;
+    }
+    const std::string dir = SqueakTempDir();
+    const std::string before = dir + "/squeak_capture_before.wav";
+    const std::string after = dir + "/squeak_capture_after.wav";
+    if (dir.empty() || !SqueakWriteWav(before, take.before, take.sample_rate_hz) ||
+        !SqueakWriteWav(after, take.after, take.sample_rate_hz)) {
+      result->Error("IO", "запись wav не удалась: " + dir);
+      return;
+    }
+    EncodableMap map;
+    map[EncodableValue("before")] = EncodableValue(before);
+    map[EncodableValue("after")] = EncodableValue(after);
+    map[EncodableValue("sampleRate")] = EncodableValue(take.sample_rate_hz);
+    map[EncodableValue("samples")] =
+        EncodableValue(static_cast<int64_t>(take.before.size()));
     result->Success(EncodableValue(map));
 #else
     result->Success();

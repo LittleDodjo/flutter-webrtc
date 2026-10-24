@@ -1,0 +1,74 @@
+name: apm-test
+
+# Врезка захвата на настоящем APM движка (common/cpp/test/squeak_apm_test.cc):
+# скачивает бинари по third_party/libwebrtc_version.ini, собирает тест без
+# Flutter и гоняет его дважды — с DeepFilterNet3 и без него (откат на RNNoise).
+
+on:
+  push:
+    branches: [squeak-nvenc-render]
+  pull_request:
+    branches: [squeak-nvenc-render]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, ubuntu-22.04]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: third_party/downloads
+          key: third-party-${{ matrix.os }}-${{ hashFiles('third_party/libwebrtc_version.ini') }}
+
+      - name: Linux deps for libwebrtc.so
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libx11-6 libxext6 libxfixes3 libxdamage1 \
+            libxrandr2 libxcomposite1 libxtst6 libxi6 libglib2.0-0 libgbm1 libdrm2
+
+      - name: Configure
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cmake -S common/cpp/test -B build/apm_test -A x64
+          else
+            cmake -S common/cpp/test -B build/apm_test -G Ninja -DCMAKE_BUILD_TYPE=Release
+          fi
+
+      - name: Build
+        run: cmake --build build/apm_test --config Release
+
+      - name: Locate binaries
+        id: bin
+        shell: bash
+        run: |
+          df_version=$(awk -F'=' '/^\[squeak_df\]/{s=1} s && /^binary_version/{gsub(/ /,"",$2); print $2; exit}' third_party/libwebrtc_version.ini)
+          echo "df_dir=$GITHUB_WORKSPACE/third_party/squeak_df_bin/$df_version" >> "$GITHUB_OUTPUT"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            exe=$(find build/apm_test -name squeak_apm_test.exe -type f | head -1)
+          else
+            exe=$(find build/apm_test -name squeak_apm_test -type f | head -1)
+            ldd "$exe" | grep 'not found' && exit 1 || true
+          fi
+          echo "exe=$exe" >> "$GITHUB_OUTPUT"
+          mkdir -p build/empty_df
+
+      - name: Full matrix with DeepFilterNet3
+        shell: bash
+        env:
+          SQUEAK_DF_DIR: ${{ steps.bin.outputs.df_dir }}
+        run: '"${{ steps.bin.outputs.exe }}" --cases full --expect-df ready'
+
+      - name: Fallback to RNNoise without the library
+        shell: bash
+        env:
+          SQUEAK_DF_DIR: ${{ github.workspace }}/build/empty_df
+        run: '"${{ steps.bin.outputs.exe }}" --cases full --expect-df missing'

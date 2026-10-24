@@ -1,6 +1,7 @@
 #include "squeak_capture_processor.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <numeric>
 
@@ -33,6 +34,9 @@ constexpr int kHoldFrames = 20;
 
 // Открытие за 2,5 мс — первую согласную не съедаем; закрытие на весь кадр.
 constexpr int kOpenRampSamples = 120;
+
+// Верхние границы корзин времени кадра, мкс; последняя корзина — всё дольше.
+constexpr int kUsBucketUpper[] = {500, 1000, 2000, 4000, 8000};
 
 }  // namespace
 
@@ -116,7 +120,42 @@ SqueakCaptureProcessor::Stats SqueakCaptureProcessor::TakeStats() {
   if (stats.deep_filtered > 0) {
     stats.lsnr_mean = lsnr_milli / 1000.0 / stats.deep_filtered;
   }
+
+  stats.frame_us_max = stat_us_max_.exchange(0);
+  int64_t buckets[kUsBuckets];
+  int64_t total = 0;
+  for (int i = 0; i < kUsBuckets; ++i) {
+    buckets[i] = stat_us_bucket_[i].exchange(0);
+    total += buckets[i];
+  }
+  if (total > 0) {
+    const int64_t target = (total * 99 + 99) / 100;
+    int64_t counted = 0;
+    for (int i = 0; i < kUsBuckets; ++i) {
+      counted += buckets[i];
+      if (counted < target) continue;
+      stats.frame_us_p99 =
+          i + 1 < kUsBuckets ? kUsBucketUpper[i] : stats.frame_us_max;
+      break;
+    }
+  }
   return stats;
+}
+
+void SqueakCaptureProcessor::RecordFrameTime(int64_t us) {
+  int bucket = kUsBuckets - 1;
+  for (int i = 0; i + 1 < kUsBuckets; ++i) {
+    if (us < kUsBucketUpper[i]) {
+      bucket = i;
+      break;
+    }
+  }
+  stat_us_bucket_[bucket].fetch_add(1);
+  const int clipped = static_cast<int>(std::min<int64_t>(us, 1 << 30));
+  int seen = stat_us_max_.load();
+  while (clipped > seen &&
+         !stat_us_max_.compare_exchange_weak(seen, clipped)) {
+  }
 }
 
 void SqueakCaptureProcessor::ResetGate() {
@@ -159,29 +198,102 @@ void SqueakCaptureProcessor::Process(int num_bands, int num_frames,
 
   stat_frames_.fetch_add(1);
 
+  const bool monitoring = monitor_on_.load(std::memory_order_acquire) &&
+                          num_frames <= kMonitorFrameMax;
+  if (monitoring) std::copy_n(buffer, num_frames, monitor_input_);
+
   if (!rnnoise_enabled_.load()) {
     ResetGate();
-  } else if (num_frames == kRnnoiseFrameSize && sample_rate_hz_ == kRnnoiseRate) {
-    Denoise48(buffer);
-  } else if (EnsureResamplers(num_frames)) {
-    // Гарнитуры часто пишут на 16 кГц, и APM работает на частоте микрофона.
-    // Сети обучены на 48 кГц: поднимаем кадр, чистим и возвращаем обратно.
-    up_->Process(buffer, num_frames, frame48_);
-    Denoise48(frame48_);
-    down_->Process(frame48_, kRnnoiseFrameSize, buffer);
-  } else if (!warned_) {
-    warned_ = true;
-    std::fprintf(stderr,
-                 "[squeak] шумодав: пропуск, %d сэмплов за 10 мс не "
-                 "пересчитываются в 48 кГц\n",
-                 num_frames);
+  } else {
+    const auto started = std::chrono::steady_clock::now();
+    if (num_frames == kRnnoiseFrameSize && sample_rate_hz_ == kRnnoiseRate) {
+      Denoise48(buffer);
+    } else if (EnsureResamplers(num_frames)) {
+      // APM отдаёт кадры на частоте записи: 16 кГц у Bluetooth-гарнитур и у
+      // встроенного AEC Windows. Сети обучены на 48 кГц: поднимаем кадр,
+      // чистим и возвращаем обратно.
+      up_->Process(buffer, num_frames, frame48_);
+      Denoise48(frame48_);
+      down_->Process(frame48_, kRnnoiseFrameSize, buffer);
+    } else if (!warned_) {
+      warned_ = true;
+      std::fprintf(stderr,
+                   "[squeak] шумодав: пропуск, %d сэмплов за 10 мс не "
+                   "пересчитываются в 48 кГц\n",
+                   num_frames);
+    }
+    RecordFrameTime(std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - started)
+                        .count());
   }
 
   const float gain = gain_.load();
-  if (gain == 1.0f) return;
+  if (gain != 1.0f) {
+    for (int i = 0; i < num_frames; ++i) {
+      buffer[i] = std::clamp(buffer[i] * gain, -kSampleMax, kSampleMax);
+    }
+  }
 
+  if (monitoring) MonitorWrite(monitor_input_, buffer, num_frames);
+}
+
+void SqueakCaptureProcessor::StartMonitor(int seconds) {
+  const int rate = sample_rate_hz_.load();
+  auto monitor = std::make_unique<Monitor>();
+  monitor->sample_rate_hz = rate;
+  monitor->capacity =
+      static_cast<size_t>(std::clamp(seconds, 1, 30)) * (rate > 0 ? rate : 48000);
+  monitor->before.assign(monitor->capacity, 0.0f);
+  monitor->after.assign(monitor->capacity, 0.0f);
+  {
+    std::lock_guard<std::mutex> lock(monitor_mutex_);
+    monitor_ = std::move(monitor);
+  }
+  monitor_on_.store(true, std::memory_order_release);
+}
+
+SqueakCaptureProcessor::MonitorTake SqueakCaptureProcessor::StopMonitor() {
+  monitor_on_.store(false);
+  std::unique_ptr<Monitor> monitor;
+  {
+    std::lock_guard<std::mutex> lock(monitor_mutex_);
+    monitor = std::move(monitor_);
+  }
+  MonitorTake take;
+  if (monitor == nullptr) return take;
+  take.sample_rate_hz = monitor->sample_rate_hz;
+  // Разворачиваем кольцо в хронологический порядок.
+  const size_t filled = monitor->wrapped ? monitor->capacity : monitor->pos;
+  const size_t start = monitor->wrapped ? monitor->pos : 0;
+  take.before.reserve(filled);
+  take.after.reserve(filled);
+  for (size_t i = 0; i < filled; ++i) {
+    const size_t idx = (start + i) % monitor->capacity;
+    take.before.push_back(monitor->before[idx]);
+    take.after.push_back(monitor->after[idx]);
+  }
+  return take;
+}
+
+void SqueakCaptureProcessor::MonitorWrite(const float* before,
+                                          const float* after, int num_frames) {
+  std::unique_lock<std::mutex> lock(monitor_mutex_, std::try_to_lock);
+  if (!lock.owns_lock() || monitor_ == nullptr) return;
+  Monitor& m = *monitor_;
+  // Смена частоты посреди записи — начинаем кольцо заново на новой частоте.
+  const int rate = sample_rate_hz_.load();
+  if (rate != m.sample_rate_hz && rate > 0) {
+    m.sample_rate_hz = rate;
+    m.pos = 0;
+    m.wrapped = false;
+  }
   for (int i = 0; i < num_frames; ++i) {
-    buffer[i] = std::clamp(buffer[i] * gain, -kSampleMax, kSampleMax);
+    m.before[m.pos] = before[i];
+    m.after[m.pos] = after[i];
+    if (++m.pos == m.capacity) {
+      m.pos = 0;
+      m.wrapped = true;
+    }
   }
 }
 

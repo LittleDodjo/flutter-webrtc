@@ -2,9 +2,9 @@ name: Build
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, squeak-nvenc-render ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, squeak-nvenc-render ]
 
 jobs:
   dart-format-and-analyze-check:
@@ -50,6 +50,7 @@ jobs:
           test "$(echo "$versions" | sort -u | wc -l)" -eq 1
 
   build-for-android:
+    if: github.ref == 'refs/heads/main'
     name: Build for Flutter Android
     runs-on: ubuntu-latest
 
@@ -69,6 +70,7 @@ jobs:
         run: flutter build apk
 
   build-for-ios:
+    if: github.ref == 'refs/heads/main'
     name: Build for Flutter iOS (${{ matrix.integration }})
     runs-on: macos-latest
     strategy:
@@ -103,6 +105,7 @@ jobs:
         run: flutter build ios --release --no-codesign
 
   build-for-windows:
+    if: github.ref == 'refs/heads/main'
     name: Build for Flutter Windows
     runs-on: windows-latest
 
@@ -118,6 +121,7 @@ jobs:
         run: flutter build windows --release
 
   build-for-macos:
+    if: github.ref == 'refs/heads/main'
     name: Build for Flutter macOS (${{ matrix.integration }})
     runs-on: macos-latest
     strategy:
@@ -152,6 +156,7 @@ jobs:
         run: flutter build macos --release
 
   build-for-linux:
+    if: github.ref == 'refs/heads/main'
     name: Build for Flutter Linux
     runs-on: ubuntu-latest
 
@@ -175,6 +180,7 @@ jobs:
         run: flutter build linux
 
   build-for-elinux:
+    if: github.ref == 'refs/heads/main'
     name: Build for Flutter Embedded Linux
     runs-on: ubuntu-latest
 
@@ -198,6 +204,7 @@ jobs:
         run: /home/runner/flutter-elinux/bin/flutter-elinux pub get && /home/runner/flutter-elinux/bin/flutter-elinux build elinux
 
   build-for-web:
+    if: github.ref == 'refs/heads/main'
     name: Build for Flutter Web
     runs-on: ubuntu-latest
 

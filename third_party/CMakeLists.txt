@@ -5,8 +5,8 @@ include(ExternalProject)
 # real third_party directory before downloading or extracting libwebrtc.
 get_filename_component(LIBWEBRTC_THIRD_PARTY_DIR "${CMAKE_CURRENT_LIST_DIR}" REALPATH)
 
-# Load binary version + download URL template from libwebrtc_version.ini so
-# bumping the prebuilt release does not require editing CMake.
+# Версии, адреса и sha256 бинарей — в libwebrtc_version.ini, чтобы бамп не
+# требовал правки CMake. Секция [libwebrtc] — движок, [squeak_df] — шумодав.
 set(LIBWEBRTC_VERSION_INI "${LIBWEBRTC_THIRD_PARTY_DIR}/libwebrtc_version.ini")
 if(NOT EXISTS "${LIBWEBRTC_VERSION_INI}")
   message(FATAL_ERROR "libwebrtc: missing version manifest at ${LIBWEBRTC_VERSION_INI}")
@@ -20,7 +20,6 @@ set(_ini_section "")
 file(STRINGS "${LIBWEBRTC_VERSION_INI}" _libwebrtc_ini_lines)
 foreach(_line IN LISTS _libwebrtc_ini_lines)
   string(STRIP "${_line}" _line)
-  # Skip blanks and comments (# or ;); remember section headers ([name]).
   if(_line STREQUAL "" OR _line MATCHES "^[#;]")
     continue()
   endif()
@@ -34,15 +33,17 @@ foreach(_line IN LISTS _libwebrtc_ini_lines)
   string(STRIP "${CMAKE_MATCH_1}" _key)
   string(STRIP "${CMAKE_MATCH_2}" _value)
   if(_ini_section STREQUAL "squeak_df")
-    if(_key STREQUAL "binary_version")
-      set(SQUEAK_DF_BINARY_VERSION "${_value}")
-    elseif(_key STREQUAL "download_url")
-      set(SQUEAK_DF_DOWNLOAD_URL_BASE "${_value}")
-    endif()
-  elseif(_key STREQUAL "binary_version")
-    set(LIBWEBRTC_BINARY_VERSION "${_value}")
+    set(_prefix "SQUEAK_DF")
+  else()
+    set(_prefix "LIBWEBRTC")
+  endif()
+  if(_key STREQUAL "binary_version")
+    set(${_prefix}_BINARY_VERSION "${_value}")
   elseif(_key STREQUAL "download_url")
-    set(LIBWEBRTC_DOWNLOAD_URL_BASE "${_value}")
+    set(${_prefix}_DOWNLOAD_URL_BASE "${_value}")
+  elseif(_key MATCHES "^sha256_(.+)$")
+    string(TOUPPER "${CMAKE_MATCH_1}" _suffix)
+    set(${_prefix}_SHA256_${_suffix} "${_value}")
   endif()
 endforeach()
 
@@ -52,6 +53,7 @@ endif()
 
 # Strip any trailing slashes so we control the separator when composing the URL.
 string(REGEX REPLACE "/+$" "" LIBWEBRTC_DOWNLOAD_URL_BASE "${LIBWEBRTC_DOWNLOAD_URL_BASE}")
+string(REGEX REPLACE "/+$" "" SQUEAK_DF_DOWNLOAD_URL_BASE "${SQUEAK_DF_DOWNLOAD_URL_BASE}")
 
 # Resolve OS field for the release asset name (win / linux)
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
@@ -91,11 +93,36 @@ else()
   endif()
 endif()
 
-set(LIBWEBRTC_ASSET "libwebrtc-${LIBWEBRTC_OS}-${LIBWEBRTC_ARCH}-release")
-set(ZIPFILE "${LIBWEBRTC_THIRD_PARTY_DIR}/downloads/${LIBWEBRTC_ASSET}.zip")
+string(TOUPPER "${LIBWEBRTC_OS}_${LIBWEBRTC_ARCH}" _squeak_variant)
 
-# Final URL = <base>/<binary_version>/<asset>.zip
-set(DOWNLOAD_URL "${LIBWEBRTC_DOWNLOAD_URL_BASE}/${LIBWEBRTC_BINARY_VERSION}/${LIBWEBRTC_ASSET}.zip")
+# Скачивание с проверкой sha256 из ini. Без хэша для этой ОС и архитектуры
+# сборка останавливается: неизвестный бинарь в неё не попадёт. Архив с
+# неверным хэшем выбрасывается и качается заново.
+function(_squeak_fetch_verified url zip_path expected_sha256 what)
+  if(expected_sha256 STREQUAL "")
+    message(FATAL_ERROR "${what}: в libwebrtc_version.ini нет sha256_${LIBWEBRTC_OS}_${LIBWEBRTC_ARCH}")
+  endif()
+  if(EXISTS "${zip_path}")
+    file(SHA256 "${zip_path}" _actual)
+    if(_actual STREQUAL "${expected_sha256}")
+      return()
+    endif()
+    message(NOTICE "${what}: хэш ${zip_path} не совпал, качаем заново")
+    file(REMOVE "${zip_path}")
+  endif()
+  message(NOTICE "download: ${url}")
+  get_filename_component(_dir "${zip_path}" DIRECTORY)
+  file(MAKE_DIRECTORY "${_dir}")
+  file(DOWNLOAD "${url}" "${zip_path}"
+      EXPECTED_HASH SHA256=${expected_sha256}
+      STATUS _status
+      LOG _log)
+  list(GET _status 0 _code)
+  if(NOT _code EQUAL 0)
+    file(REMOVE "${zip_path}")
+    message(FATAL_ERROR "${what}: не скачался (${_status}): ${_log}")
+  endif()
+endfunction()
 
 function(_libwebrtc_extract_and_normalize zip_path dest_dir)
   # Extract into an isolated staging dir so we can normalize the top-level
@@ -132,34 +159,44 @@ function(_libwebrtc_extract_and_normalize zip_path dest_dir)
   file(REMOVE_RECURSE "${_staging}")
 endfunction()
 
-if(NOT EXISTS "${ZIPFILE}")
-  message(NOTICE "download: ${DOWNLOAD_URL}")
-  file(MAKE_DIRECTORY "${LIBWEBRTC_THIRD_PARTY_DIR}/downloads")
-  file(DOWNLOAD "${DOWNLOAD_URL}"
-      ${ZIPFILE}
-      STATUS download_status
-      LOG download_log)
+# ---- libwebrtc -------------------------------------------------------------
+set(LIBWEBRTC_ASSET "libwebrtc-${LIBWEBRTC_OS}-${LIBWEBRTC_ARCH}-release")
+# Версия в имени архива: раньше бамп binary_version на машине с кэшем молча
+# оставлял старый движок.
+set(ZIPFILE "${LIBWEBRTC_THIRD_PARTY_DIR}/downloads/${LIBWEBRTC_ASSET}-${LIBWEBRTC_BINARY_VERSION}.zip")
+set(DOWNLOAD_URL "${LIBWEBRTC_DOWNLOAD_URL_BASE}/${LIBWEBRTC_BINARY_VERSION}/${LIBWEBRTC_ASSET}.zip")
+_squeak_fetch_verified("${DOWNLOAD_URL}" "${ZIPFILE}" "${LIBWEBRTC_SHA256_${_squeak_variant}}" "libwebrtc")
 
-  if(NOT download_status EQUAL 0)
-    message(FATAL_ERROR "Failed to download dependency: ${download_log}")
-  endif()
-
+# Распаковка по штампу: каталог libwebrtc/ пересобирается, когда версия или
+# платформа сменились, иначе остаётся как есть.
+set(_libwebrtc_stamp "${LIBWEBRTC_THIRD_PARTY_DIR}/libwebrtc/.version")
+set(_libwebrtc_want "${LIBWEBRTC_BINARY_VERSION}-${LIBWEBRTC_OS}-${LIBWEBRTC_ARCH}")
+set(_libwebrtc_have "")
+if(EXISTS "${_libwebrtc_stamp}")
+  file(READ "${_libwebrtc_stamp}" _libwebrtc_have)
+  string(STRIP "${_libwebrtc_have}" _libwebrtc_have)
+endif()
+if(NOT _libwebrtc_have STREQUAL _libwebrtc_want)
+  message(NOTICE "libwebrtc: распаковка ${_libwebrtc_want}")
   _libwebrtc_extract_and_normalize("${ZIPFILE}" "${LIBWEBRTC_THIRD_PARTY_DIR}")
-else()
-  if(NOT EXISTS "${LIBWEBRTC_THIRD_PARTY_DIR}/libwebrtc")
-    message(NOTICE "libwebrtc directory does not exist after extraction.")
-    _libwebrtc_extract_and_normalize("${ZIPFILE}" "${LIBWEBRTC_THIRD_PARTY_DIR}")
-  endif()
-  message(TRACE "libwebrtc already downloaded.")
+  file(WRITE "${_libwebrtc_stamp}" "${_libwebrtc_want}\n")
 endif()
 
-# Шумодав DeepFilterNet3 (third_party/squeak_df, workflow squeak_df.yml).
-# Плагин грузит его в рантайме, поэтому сбой загрузки здесь не фатален:
-# без библиотеки шумодав остаётся на RNNoise. SQUEAK_DF_LIBRARY — путь к
-# библиотеке для bundled_libraries, пустой, если её нет.
+# ---- squeak_df (DeepFilterNet3) -------------------------------------------
+# Шумодав из third_party/squeak_df, релиз собирает workflow squeak_df.yml.
+# Плагин грузит библиотеку в рантайме и без неё откатывается на RNNoise, но
+# сборка без неё — ошибка, а не предупреждение: иначе установщик молча уезжает
+# без шумодава. SQUEAK_DF_REQUIRED=OFF — выключатель для локальной сборки.
+option(SQUEAK_DF_REQUIRED "Сборка падает без DeepFilterNet3" ON)
+if(DEFINED ENV{SQUEAK_DF_REQUIRED})
+  set(SQUEAK_DF_REQUIRED "$ENV{SQUEAK_DF_REQUIRED}")
+endif()
 set(SQUEAK_DF_LIBRARY "")
-if(NOT SQUEAK_DF_BINARY_VERSION STREQUAL "" AND NOT SQUEAK_DF_DOWNLOAD_URL_BASE STREQUAL "")
-  string(REGEX REPLACE "/+$" "" SQUEAK_DF_DOWNLOAD_URL_BASE "${SQUEAK_DF_DOWNLOAD_URL_BASE}")
+if(SQUEAK_DF_BINARY_VERSION STREQUAL "" OR SQUEAK_DF_DOWNLOAD_URL_BASE STREQUAL "")
+  if(SQUEAK_DF_REQUIRED)
+    message(FATAL_ERROR "squeak_df: в ${LIBWEBRTC_VERSION_INI} нет секции [squeak_df]")
+  endif()
+else()
   if(LIBWEBRTC_OS STREQUAL "win")
     set(_squeak_df_file "squeak_df.dll")
   else()
@@ -168,18 +205,10 @@ if(NOT SQUEAK_DF_BINARY_VERSION STREQUAL "" AND NOT SQUEAK_DF_DOWNLOAD_URL_BASE 
   set(_squeak_df_asset "squeak_df-${LIBWEBRTC_OS}-${LIBWEBRTC_ARCH}")
   set(_squeak_df_zip "${LIBWEBRTC_THIRD_PARTY_DIR}/downloads/${_squeak_df_asset}-${SQUEAK_DF_BINARY_VERSION}.zip")
   set(_squeak_df_dir "${LIBWEBRTC_THIRD_PARTY_DIR}/squeak_df_bin/${SQUEAK_DF_BINARY_VERSION}")
-  if(NOT EXISTS "${_squeak_df_zip}")
-    set(_squeak_df_url "${SQUEAK_DF_DOWNLOAD_URL_BASE}/${SQUEAK_DF_BINARY_VERSION}/${_squeak_df_asset}.zip")
-    message(NOTICE "download: ${_squeak_df_url}")
-    file(MAKE_DIRECTORY "${LIBWEBRTC_THIRD_PARTY_DIR}/downloads")
-    file(DOWNLOAD "${_squeak_df_url}" "${_squeak_df_zip}.part" STATUS _squeak_df_status)
-    list(GET _squeak_df_status 0 _squeak_df_code)
-    if(_squeak_df_code EQUAL 0)
-      file(RENAME "${_squeak_df_zip}.part" "${_squeak_df_zip}")
-    else()
-      file(REMOVE "${_squeak_df_zip}.part")
-      message(WARNING "squeak_df: не скачался (${_squeak_df_status}), шумодав останется на RNNoise")
-    endif()
+  set(_squeak_df_url "${SQUEAK_DF_DOWNLOAD_URL_BASE}/${SQUEAK_DF_BINARY_VERSION}/${_squeak_df_asset}.zip")
+  set(_squeak_df_sha "${SQUEAK_DF_SHA256_${_squeak_variant}}")
+  if(SQUEAK_DF_REQUIRED OR NOT _squeak_df_sha STREQUAL "")
+    _squeak_fetch_verified("${_squeak_df_url}" "${_squeak_df_zip}" "${_squeak_df_sha}" "squeak_df")
   endif()
   if(EXISTS "${_squeak_df_zip}" AND NOT EXISTS "${_squeak_df_dir}/${_squeak_df_file}")
     file(MAKE_DIRECTORY "${_squeak_df_dir}")
@@ -187,5 +216,9 @@ if(NOT SQUEAK_DF_BINARY_VERSION STREQUAL "" AND NOT SQUEAK_DF_DOWNLOAD_URL_BASE 
   endif()
   if(EXISTS "${_squeak_df_dir}/${_squeak_df_file}")
     set(SQUEAK_DF_LIBRARY "${_squeak_df_dir}/${_squeak_df_file}")
+  elseif(SQUEAK_DF_REQUIRED)
+    message(FATAL_ERROR "squeak_df: ${_squeak_df_file} не найден после распаковки ${_squeak_df_zip}")
+  else()
+    message(WARNING "squeak_df: библиотеки нет, шумодав останется на RNNoise")
   endif()
 endif()

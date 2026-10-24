@@ -144,3 +144,8 @@ set_property(
     PROPERTY BUILD_RPATH
     "\$ORIGIN"
 )
+
+# Тест врезки на настоящем APM собирается вместе с приложением; CI клиента
+# запускает его на готовом бандле. В бандл не попадает.
+include("${CMAKE_CURRENT_SOURCE_DIR}/../common/cpp/test/squeak_apm_test.cmake")
+squeak_add_apm_test()

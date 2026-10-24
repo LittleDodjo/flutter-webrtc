@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstddef>
 #include <mutex>
+#include <string>
 #include <thread>
 
 namespace flutter_webrtc_plugin {
@@ -32,6 +33,13 @@ class SqueakDeepFilter {
 
   Status status() const { return status_.load(); }
 
+  // Откуда загружена библиотека; пусто, пока не kReady.
+  std::string library_path() const {
+    return status_.load(std::memory_order_acquire) == Status::kReady
+               ? library_path_
+               : std::string();
+  }
+
   // Кадр kFrameSize сэмплов в шкале int16, на месте. Только из аудиопотока и
   // только при kReady. Возвращает локальный SNR кадра в дБ; false — модель
   // сломалась, кадр не тронут, дальше статус kFailed.
@@ -52,6 +60,7 @@ class SqueakDeepFilter {
   void* state_ = nullptr;
   ProcessFn process_ = nullptr;
   FreeFn free_ = nullptr;
+  std::string library_path_;
 
   float in_[kFrameSize] = {};
   float out_[kFrameSize] = {};
