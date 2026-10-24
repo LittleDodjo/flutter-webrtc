@@ -40,6 +40,7 @@ add_library(${PLUGIN_NAME} SHARED
   "../common/cpp/src/flutter_webrtc_base.cc"
   "../common/cpp/src/squeak_capture_processor.cc"
   "../common/cpp/src/squeak_deep_filter.cc"
+  "../common/cpp/src/squeak_resampler.cc"
   ${RNNOISE_SOURCES}
   "../common/cpp/src/flutter_common.cc"
   "loopback_capturer_factory.cc"

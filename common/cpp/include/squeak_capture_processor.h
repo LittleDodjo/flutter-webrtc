@@ -7,6 +7,7 @@
 
 #include "rtc_audio_processing.h"
 #include "squeak_deep_filter.h"
+#include "squeak_resampler.h"
 
 namespace flutter_webrtc_plugin {
 
@@ -77,9 +78,13 @@ class SqueakCaptureProcessor
  private:
   struct State;
 
-  // Оба шумодава работают только на 48 кГц кадрами по 480 сэмплов. На другой
-  // частоте шумодав пропускаем, а усиление применяем всё равно.
-  bool RnnoiseApplicable(int num_frames) const;
+  // Обе сети работают на 48 кГц кадрами по 480 сэмплов. Другую частоту APM
+  // (16 и 32 кГц) пересчитываем; не пересчитывается — шумодав пропускаем, а
+  // усиление применяем всё равно.
+  bool EnsureResamplers(int num_frames);
+
+  // Кадр 480 сэмплов на 48 кГц: DFN3, если готов, иначе RNNoise с гейтом.
+  void Denoise48(float* frame);
 
   // Гасит кадр, если голоса нет дольше удержания. Плавно, чтобы на границе
   // не было щелчка от самого гейта.
@@ -104,6 +109,11 @@ class SqueakCaptureProcessor
   std::atomic<int64_t> stat_lsnr_milli_{0};
 
   SqueakDeepFilter deep_filter_;
+
+  std::unique_ptr<SqueakResampler> up_;
+  std::unique_ptr<SqueakResampler> down_;
+  int resampled_rate_ = 0;
+  float frame48_[480] = {};
 
   std::atomic<float> gain_{1.0f};
 

@@ -32,6 +32,7 @@ add_library(${PLUGIN_NAME} SHARED
   "../common/cpp/src/flutter_webrtc_base.cc"
   "../common/cpp/src/squeak_capture_processor.cc"
   "../common/cpp/src/squeak_deep_filter.cc"
+  "../common/cpp/src/squeak_resampler.cc"
   "../third_party/rnnoise/src/celt_lpc.c"
   "../third_party/rnnoise/src/denoise.c"
   "../third_party/rnnoise/src/kiss_fft.c"

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <numeric>
 
 extern "C" {
 #include "rnnoise.h"
@@ -66,8 +67,37 @@ void SqueakCaptureProcessor::Release() {
   sample_rate_hz_ = 0;
 }
 
-bool SqueakCaptureProcessor::RnnoiseApplicable(int num_frames) const {
-  return num_frames == kRnnoiseFrameSize && sample_rate_hz_ == kRnnoiseRate;
+bool SqueakCaptureProcessor::EnsureResamplers(int num_frames) {
+  const int rate = num_frames * 100;
+  if (up_ != nullptr && resampled_rate_ == rate) return true;
+  const int g = std::gcd(kRnnoiseRate, rate);
+  const int up = kRnnoiseRate / g, down = rate / g;
+  if (static_cast<int64_t>(num_frames) * up != int64_t{kRnnoiseFrameSize} * down) {
+    return false;
+  }
+  up_ = std::make_unique<SqueakResampler>(up, down);
+  down_ = std::make_unique<SqueakResampler>(down, up);
+  resampled_rate_ = rate;
+  ResetGate();
+  return true;
+}
+
+void SqueakCaptureProcessor::Denoise48(float* frame) {
+  float lsnr = 0;
+  if (deep_filter_.Process(frame, &lsnr)) {
+    stat_denoised_.fetch_add(1);
+    stat_deep_filtered_.fetch_add(1);
+    stat_lsnr_milli_.fetch_add(static_cast<int64_t>(lsnr * 1000.0f));
+    ResetGate();
+    return;
+  }
+  if (state_ == nullptr || state_->denoiser == nullptr) return;
+  // Шкала совпадает: APM держит float в диапазоне int16, того же ждёт и
+  // RNNoise. Обрабатываем на месте, in и out могут совпадать.
+  const float vad = rnnoise_process_frame(state_->denoiser, frame, frame);
+  stat_denoised_.fetch_add(1);
+  stat_vad_milli_.fetch_add(static_cast<int64_t>(vad * 1000.0f));
+  ApplyGate(vad, kRnnoiseFrameSize, frame);
 }
 
 SqueakCaptureProcessor::Stats SqueakCaptureProcessor::TakeStats() {
@@ -129,31 +159,22 @@ void SqueakCaptureProcessor::Process(int num_bands, int num_frames,
 
   stat_frames_.fetch_add(1);
 
-  float lsnr = 0;
   if (!rnnoise_enabled_.load()) {
     ResetGate();
-  } else if (RnnoiseApplicable(num_frames) &&
-             deep_filter_.Process(buffer, &lsnr)) {
-    stat_denoised_.fetch_add(1);
-    stat_deep_filtered_.fetch_add(1);
-    stat_lsnr_milli_.fetch_add(static_cast<int64_t>(lsnr * 1000.0f));
-    ResetGate();
-  } else if (state_ != nullptr && state_->denoiser != nullptr) {
-    if (RnnoiseApplicable(num_frames)) {
-      // Шкала совпадает: APM держит float в диапазоне int16, того же ждёт и
-      // RNNoise. Обрабатываем на месте, in и out могут совпадать.
-      const float vad =
-          rnnoise_process_frame(state_->denoiser, buffer, buffer);
-      stat_denoised_.fetch_add(1);
-      stat_vad_milli_.fetch_add(static_cast<int64_t>(vad * 1000.0f));
-      ApplyGate(vad, num_frames, buffer);
-    } else if (!warned_) {
-      warned_ = true;
-      std::fprintf(stderr,
-                   "[squeak] rnnoise: пропуск, ожидалось 480 кадров "
-                   "на 48000 Гц, пришло %d на %d Гц\n",
-                   num_frames, sample_rate_hz_);
-    }
+  } else if (num_frames == kRnnoiseFrameSize && sample_rate_hz_ == kRnnoiseRate) {
+    Denoise48(buffer);
+  } else if (EnsureResamplers(num_frames)) {
+    // Гарнитуры часто пишут на 16 кГц, и APM работает на частоте микрофона.
+    // Сети обучены на 48 кГц: поднимаем кадр, чистим и возвращаем обратно.
+    up_->Process(buffer, num_frames, frame48_);
+    Denoise48(frame48_);
+    down_->Process(frame48_, kRnnoiseFrameSize, buffer);
+  } else if (!warned_) {
+    warned_ = true;
+    std::fprintf(stderr,
+                 "[squeak] шумодав: пропуск, %d сэмплов за 10 мс не "
+                 "пересчитываются в 48 кГц\n",
+                 num_frames);
   }
 
   const float gain = gain_.load();
