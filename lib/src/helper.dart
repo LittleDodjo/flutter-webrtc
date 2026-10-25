@@ -5,7 +5,6 @@ import 'package:flutter/foundation.dart';
 import 'package:logger/logger.dart';
 
 import '../flutter_webrtc.dart';
-import 'native_logs_listener.dart';
 
 class Helper {
   /// Set Logger object for webrtc;

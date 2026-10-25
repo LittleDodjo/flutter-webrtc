@@ -36,6 +36,7 @@
 
 #include "rtc_audio_processing_sandbox.h"
 #include "squeak_capture_processor.h"
+#include "squeak_resampler.h"
 
 namespace {
 
@@ -61,11 +62,13 @@ constexpr double kClickPeakDbfs = -20.0;
 constexpr double kFloorDbfs = -60.0;
 
 // Допуск по голосу. Синтетический голос для сети «страннее» живой речи: на
-// живой записи DFN3 держит голос в пределах 0,5 дБ, на синтетике при 16 кГц
-// снимает до 3,3 дБ. Порог ловит разрушение голоса (−25 дБ и хуже было при
-// стерильном сигнале без шумового пола), а не нюансы качества — те меряются
-// на живой речи на стенде.
-constexpr double kVoiceToleranceDb = 4.0;
+// живой записи DFN3 держит голос в пределах 0,5 дБ, на синтетике через
+// настоящий APM снимает до 4,2 дБ, а с AGC1 — до 7: тот поднимает уровень
+// вместе с шумовым полом, и SNR синтетики падает. Пороги ловят разрушение
+// голоса (−25 дБ и хуже было при стерильном сигнале без шумового пола), а не
+// нюансы качества — те меряются на живой речи (--speech) и на стенде.
+constexpr double kVoiceToleranceDb = 5.0;
+constexpr double kVoiceToleranceAgcDb = 8.0;
 
 // Ослабление щелчков в паузах: DFN3 на живой записи даёт 35–40 дБ, RNNoise с
 // гейтом — 15–20; пороги вдвое ниже, чтобы ловить выпадение из тракта.
@@ -76,7 +79,100 @@ struct Options {
   std::string cases = "full";
   std::string expect_df = "any";
   std::string bundle;
+  // WAV 16 бит (моно или стерео) вместо синтетического голоса: живая речь
+  // через настоящий APM, с AGC и без — цифры качества, а не только тракта.
+  std::string speech;
 };
+
+// Голос из файла: сводится в моно, пересчитывается на частоту кейса тем же
+// ресемплером, что в процессоре, обрезается до нужной длины.
+std::vector<float> g_speech_file;
+int g_speech_file_rate = 0;
+
+bool ReadWav16(const std::string& path, std::vector<float>* mono, int* rate) {
+  FILE* f = std::fopen(path.c_str(), "rb");
+  if (f == nullptr) return false;
+  std::fseek(f, 0, SEEK_END);
+  const long size = std::ftell(f);
+  std::fseek(f, 0, SEEK_SET);
+  if (size < 44) {
+    std::fclose(f);
+    return false;
+  }
+  std::vector<unsigned char> raw(static_cast<size_t>(size));
+  const size_t got = std::fread(raw.data(), 1, raw.size(), f);
+  std::fclose(f);
+  if (got != raw.size() || std::memcmp(raw.data(), "RIFF", 4) != 0) return false;
+  int channels = 0;
+  size_t pos = 12;
+  while (pos + 8 <= raw.size()) {
+    uint32_t len;
+    std::memcpy(&len, &raw[pos + 4], 4);
+    if (std::memcmp(&raw[pos], "fmt ", 4) == 0 && len >= 16) {
+      uint16_t format, ch, bits;
+      uint32_t sr;
+      std::memcpy(&format, &raw[pos + 8], 2);
+      std::memcpy(&ch, &raw[pos + 10], 2);
+      std::memcpy(&sr, &raw[pos + 12], 4);
+      std::memcpy(&bits, &raw[pos + 22], 2);
+      // 1 — PCM, 0xFFFE — WAVE_FORMAT_EXTENSIBLE (так пишет afconvert).
+      if ((format != 1 && format != 0xFFFE) || bits != 16 || ch == 0) {
+        return false;
+      }
+      channels = ch;
+      *rate = static_cast<int>(sr);
+    } else if (std::memcmp(&raw[pos], "data", 4) == 0 && channels > 0) {
+      const size_t frames = std::min<size_t>(len, raw.size() - pos - 8) / 2 / channels;
+      mono->resize(frames);
+      for (size_t i = 0; i < frames; ++i) {
+        double sum = 0;
+        for (int c = 0; c < channels; ++c) {
+          int16_t s;
+          std::memcpy(&s, &raw[pos + 8 + (i * channels + c) * 2], 2);
+          sum += s;
+        }
+        (*mono)[i] = static_cast<float>(sum / channels / 32768.0);
+      }
+      return true;
+    }
+    pos += 8 + len + (len & 1);
+  }
+  return false;
+}
+
+std::vector<float> SpeechFromFile(int rate, double seconds) {
+  const int n = static_cast<int>(rate * seconds);
+  std::vector<float> src = g_speech_file;
+  if (g_speech_file_rate != rate) {
+    // Пачками по 10 мс входной частоты, как в APM.
+    int a = g_speech_file_rate, b = rate;
+    while (b != 0) {
+      const int t = a % b;
+      a = b;
+      b = t;
+    }
+    flutter_webrtc_plugin::SqueakResampler resampler(rate / a, g_speech_file_rate / a);
+    const int in_frame = g_speech_file_rate / 100;
+    std::vector<float> out;
+    std::vector<float> chunk(static_cast<size_t>(rate / 100) + 16);
+    for (size_t off = 0; off + in_frame <= src.size(); off += in_frame) {
+      const int produced = resampler.Process(&src[off], in_frame, chunk.data());
+      out.insert(out.end(), chunk.begin(), chunk.begin() + produced);
+    }
+    src = std::move(out);
+  }
+  // Первые полсекунды файла часто тишина или щелчок записи — пропускаем.
+  const size_t skip = std::min<size_t>(src.size(), static_cast<size_t>(rate / 2));
+  std::vector<float> out(n, 0.0f);
+  for (int i = 0; i < n && skip + i < src.size(); ++i) out[i] = src[skip + i];
+  double energy = 0;
+  for (float x : out) energy += static_cast<double>(x) * x;
+  if (energy > 0) {
+    const double gain = std::pow(10.0, kSpeechDbfs / 20.0) / std::sqrt(energy / n);
+    for (float& x : out) x = static_cast<float>(x * gain);
+  }
+  return out;
+}
 
 struct Case {
   int rate;
@@ -200,7 +296,8 @@ Signal MakeSignal(int rate, int channels) {
   const int n = static_cast<int>(rate * kTotalSec);
   s.speech.assign(n, 0.0f);
   const std::vector<float> voice =
-      MakeSpeech(rate, kSpeechToSec - kSpeechFromSec);
+      g_speech_file.empty() ? MakeSpeech(rate, kSpeechToSec - kSpeechFromSec)
+                            : SpeechFromFile(rate, kSpeechToSec - kSpeechFromSec);
   const int from = static_cast<int>(rate * kSpeechFromSec);
   const int fade = rate / 50;
   for (size_t i = 0; i < voice.size() && from + i < s.speech.size(); ++i) {
@@ -463,6 +560,8 @@ bool ParseArgs(int argc, char** argv, Options* options) {
       options->expect_df = argv[++i];
     } else if (arg == "--bundle" && has_value) {
       options->bundle = argv[++i];
+    } else if (arg == "--speech" && has_value) {
+      options->speech = argv[++i];
     } else {
       std::fprintf(stderr, "неизвестный аргумент: %s\n", arg.c_str());
       return false;
@@ -494,8 +593,20 @@ int main(int argc, char** argv) {
   if (!ParseArgs(argc, argv, &options)) {
     std::fprintf(stderr,
                  "squeak_apm_test [--cases full|smoke] "
-                 "[--expect-df ready|missing|any] [--bundle <dir>]\n");
+                 "[--expect-df ready|missing|any] [--bundle <dir>] "
+                 "[--speech <wav>]\n");
     return kExitUsage;
+  }
+  if (!options.speech.empty()) {
+    if (!ReadWav16(options.speech, &g_speech_file, &g_speech_file_rate) ||
+        g_speech_file.size() < static_cast<size_t>(g_speech_file_rate)) {
+      std::fprintf(stderr, "--speech: нужен WAV PCM 16 бит длиннее секунды: %s\n",
+                   options.speech.c_str());
+      return kExitUsage;
+    }
+    std::printf("speech from %s (%d Hz, %.1f s)\n", options.speech.c_str(),
+                g_speech_file_rate,
+                static_cast<double>(g_speech_file.size()) / g_speech_file_rate);
   }
 
   int passed = 0;
@@ -568,7 +679,8 @@ int main(int argc, char** argv) {
       if (!narrowband && m.click_db < (deep ? kClickDeepDb : kClickRnnoiseDb)) {
         why += " click";
       }
-      if (!narrowband && std::fabs(m.voice_db) > kVoiceToleranceDb) why += " voice";
+      const double voice_limit = c.agc ? kVoiceToleranceAgcDb : kVoiceToleranceDb;
+      if (!narrowband && std::fabs(m.voice_db) > voice_limit) why += " voice";
       if (c.channels > 1 && m.stereo_diff > 1e-3) why += " stereo";
     } else {
       bool finite = true;
