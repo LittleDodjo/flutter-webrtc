@@ -753,39 +753,42 @@ scoped_refptr<RTCRtpParameters> FlutterPeerConnection::updateRtpParameters(
       if (!value.IsNull()) {
         param->set_active(GetValue<bool>(value));
       }
+      // Геттер отдаёт незаданное нулём или пустой строкой, и Dart присылает
+      // это обратно. Записанное как есть, оно становится «изменением»:
+      // scalabilityMode "" WebRTC отклоняет как неподдерживаемый, ssrc
+      // менять нельзя вовсе — и SetParameters отбрасывается целиком, вместе
+      // с паузой слоя (SQC-258). Поэтому пустое не пишем, ssrc не трогаем.
       value = findEncodableValue(map, "rid");
       if (!value.IsNull()) {
-        param->set_rid(GetValue<std::string>(value));
-      }
-      value = findEncodableValue(map, "ssrc");
-      if (!value.IsNull()) {
-        param->set_ssrc(GetValue<int>(value));
+        const std::string rid = GetValue<std::string>(value);
+        if (!rid.empty()) param->set_rid(rid);
       }
       value = findEncodableValue(map, "maxBitrate");
-      if (!value.IsNull()) {
+      if (!value.IsNull() && GetValue<int>(value) > 0) {
         param->set_max_bitrate_bps(GetValue<int>(value));
       }
 
       value = findEncodableValue(map, "minBitrate");
-      if (!value.IsNull()) {
+      if (!value.IsNull() && GetValue<int>(value) > 0) {
         param->set_min_bitrate_bps(GetValue<int>(value));
       }
 
       value = findEncodableValue(map, "maxFramerate");
-      if (!value.IsNull()) {
+      if (!value.IsNull() && GetValue<int>(value) > 0) {
         param->set_max_framerate(GetValue<int>(value));
       }
       value = findEncodableValue(map, "numTemporalLayers");
-      if (!value.IsNull()) {
+      if (!value.IsNull() && GetValue<int>(value) > 0) {
         param->set_num_temporal_layers(GetValue<int>(value));
       }
       value = findEncodableValue(map, "scaleResolutionDownBy");
-      if (!value.IsNull()) {
+      if (!value.IsNull() && GetValue<double>(value) >= 1.0) {
         param->set_scale_resolution_down_by(GetValue<double>(value));
       }
       value = findEncodableValue(map, "scalabilityMode");
       if (!value.IsNull()) {
-        param->set_scalability_mode(GetValue<std::string>(value));
+        const std::string mode = GetValue<std::string>(value);
+        if (!mode.empty()) param->set_scalability_mode(mode);
       }
       value = findEncodableValue(map, "priority");
       if (!value.IsNull()) {
