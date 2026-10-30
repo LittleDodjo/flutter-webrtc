@@ -798,6 +798,10 @@ scoped_refptr<RTCRtpParameters> FlutterPeerConnection::updateRtpParameters(
       encoding++;
     }
   }
+  // encodings() отдаёт копии слоёв: без записи обратно setParameters из Dart
+  // молча терял active, maxBitrate, maxFramerate и масштаб — пауза dynacast
+  // не доходила до движка, и все слои шли всегда (SQC-258). Как в апстриме.
+  parameters->set_encodings(params);
 
   EncodableValue value =
       findEncodableValue(newParameters, "degradationPreference");
