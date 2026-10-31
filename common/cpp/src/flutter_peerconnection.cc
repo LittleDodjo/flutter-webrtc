@@ -819,6 +819,11 @@ scoped_refptr<RTCRtpParameters> FlutterPeerConnection::updateRtpParameters(
     } else if (degradationPreference == "balanced") {
       parameters->SetDegradationPreference(
           libwebrtc::RTCDegradationPreference::BALANCED);
+    } else if (degradationPreference == "maintain-framerate-and-resolution") {
+      // Демонстрация экрана (SQC-293): без этой ветки значение терялось,
+      // и под нагрузкой webrtc резал частоту 60 → 40 → 26.
+      parameters->SetDegradationPreference(
+          libwebrtc::RTCDegradationPreference::MAINTAIN_FRAMERATE_AND_RESOLUTION);
     } else if (degradationPreference == "disabled") {
       parameters->SetDegradationPreference(
           libwebrtc::RTCDegradationPreference::DISABLED);
