@@ -149,6 +149,24 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
 
   public AudioProcessingController audioProcessingController;
 
+  // WARP (WebRTC Abridged Roundtrip Protocol, draft-uberti-tsvwg-warp) is opted
+  // into through the `enableWARP` initialize() option. The part of it that
+  // libwebrtc implements is `WebRTC-IceHandshakeDtls`, the DTLS handshake
+  // piggybacked on the ICE STUN binding exchange. Field trials are process-global
+  // and are read when a peer connection builds its transports, so they are passed
+  // to PeerConnectionFactory.initialize() before any peer connection exists.
+  private static final String FIELD_TRIAL_ICE_HANDSHAKE_DTLS =
+          "WebRTC-IceHandshakeDtls/Enabled/";
+
+  // `WebRTC-ForcePlayoutDelay` renders every frame as soon as it is decoded instead
+  // of holding it back for the jitter buffer target delay. Opted into through the
+  // `zeroPlayoutDelay` initialize() option, and read at the same moment as the
+  // trial above.
+  private static final String FIELD_TRIAL_FORCE_PLAYOUT_DELAY =
+          "WebRTC-ForcePlayoutDelay/min_ms:0,max_ms:0/";
+
+  private static boolean warpEnabled = false;
+
   public static class LogSink implements Loggable {
     @Override
     public void onLogMessage(String message, Severity sev, String tag) {
@@ -177,6 +195,17 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
   }
 
   void dispose() {
+    for (int i = 0; i < renders.size(); i++) {
+      FlutterRTCVideoRenderer renderer = renders.valueAt(i);
+      if (renderer != null) {
+        try {
+          renderer.Dispose();
+        } catch (Exception e) {
+          Log.w(TAG, "dispose(): error disposing renderer", e);
+        }
+      }
+    }
+    renders.clear();
     for (final MediaStream mediaStream : localStreams.values()) {
       try {
         streamDispose(mediaStream);
@@ -213,17 +242,32 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     mPeerConnectionObservers.clear();
   }
   private void initialize(boolean bypassVoiceProcessing, boolean androidUseHardwareAudioProcessing, int networkIgnoreMask, boolean forceSWCodec, List<String> forceSWCodecList,
-  @Nullable ConstraintsMap androidAudioConfiguration, Severity logSeverity, @Nullable Integer audioSampleRate, @Nullable Integer audioOutputSampleRate) {
+  @Nullable ConstraintsMap androidAudioConfiguration, Severity logSeverity, @Nullable Integer audioSampleRate, @Nullable Integer audioOutputSampleRate, boolean enableWARP, boolean zeroPlayoutDelay) {
     if (mFactory != null) {
       return;
     }
 
     final long started = SystemClock.elapsedRealtime();
-    PeerConnectionFactory.initialize(
+    warpEnabled = enableWARP;
+
+    InitializationOptions.Builder initializationOptionsBuilder =
             InitializationOptions.builder(context)
                     .setEnableInternalTracer(true)
-                    .setInjectableLogger(logSink, logSeverity)
-                    .createInitializationOptions());
+                    .setInjectableLogger(logSink, logSeverity);
+
+    String fieldTrials = "";
+    if (enableWARP) {
+      fieldTrials += FIELD_TRIAL_ICE_HANDSHAKE_DTLS;
+    }
+    if (zeroPlayoutDelay) {
+      fieldTrials += FIELD_TRIAL_FORCE_PLAYOUT_DELAY;
+    }
+    if (!fieldTrials.isEmpty()) {
+      initializationOptionsBuilder.setFieldTrials(fieldTrials);
+      Log.d(TAG, "enabled field trials: " + fieldTrials);
+    }
+
+    PeerConnectionFactory.initialize(initializationOptionsBuilder.createInitializationOptions());
     final long libReady = SystemClock.elapsedRealtime();
 
     getUserMediaImpl = new GetUserMediaImpl(this, context);
@@ -473,6 +517,23 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
           result.success(null);
           break;
         }
+        // WARP (draft-uberti-tsvwg-warp): shortens the connection setup by running
+        // the DTLS handshake inside the ICE STUN binding exchange. Has to be known
+        // here, the field trial is read before any peer connection is built.
+        boolean enableWARP = false;
+        if (constraintsMap.hasKey("enableWARP")
+                && constraintsMap.getType("enableWARP") == ObjectType.Boolean) {
+          enableWARP = constraintsMap.getBoolean("enableWARP");
+        }
+
+        // Render frames as soon as they are decoded, trading jitter buffer smoothing
+        // for latency. Same timing constraint as WARP: it is a field trial.
+        boolean zeroPlayoutDelay = false;
+        if (constraintsMap.hasKey("zeroPlayoutDelay")
+                && constraintsMap.getType("zeroPlayoutDelay") == ObjectType.Boolean) {
+          zeroPlayoutDelay = constraintsMap.getBoolean("zeroPlayoutDelay");
+        }
+
         // Building the factory takes a second and more on a phone, and since
         // Flutter 3.29 the platform thread is the UI thread: frames and input
         // stalled for that long. Nothing in initialize() needs the main thread,
@@ -485,9 +546,11 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
         final Severity severity = logSeverity;
         final Integer sampleRate = audioSampleRate;
         final Integer outputSampleRate = audioOutputSampleRate;
+        final boolean warp = enableWARP;
+        final boolean zeroDelay = zeroPlayoutDelay;
         executor.execute(() -> {
           try {
-            initialize(bypass, hwProcessing, ignoreMask, swCodec, forceSWCodecList, audioConfig, severity, sampleRate, outputSampleRate);
+            initialize(bypass, hwProcessing, ignoreMask, swCodec, forceSWCodecList, audioConfig, severity, sampleRate, outputSampleRate, warp, zeroDelay);
             result.success(null);
           } catch (Throwable t) {
             resultError("initialize", t.toString(), result);
@@ -1330,6 +1393,13 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     }
     List<IceServer> iceServers = createIceServers(iceServersArray);
     RTCConfiguration conf = new RTCConfiguration(iceServers);
+
+    // Enable SNAP (SCTP INIT in SDP), part of WARP.
+    // see https://www.ietf.org/archive/id/draft-hancke-tsvwg-snap-00.html
+    if (warpEnabled) {
+      conf.enableSctpSnap = true;
+    }
+
     if (map == null) {
       return conf;
     }
@@ -1373,6 +1443,11 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
             break;
         }
       }
+    }
+
+    if (map.hasKey("enableSctpSnap")
+            && map.getType("enableSctpSnap") == ObjectType.Boolean) {
+      conf.enableSctpSnap = map.getBoolean("enableSctpSnap");
     }
 
     // rtcpMuxPolicy (public api)
@@ -1601,6 +1676,11 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     }
     final String trackId = track.id();
     mainHandler.post(() -> {
+      // The peer connection may have been disposed meanwhile (on this
+      // thread), and its tracks with it.
+      if (track.isDisposed()) {
+        return;
+      }
       for (int i = 0; i < renders.size(); i++) {
         FlutterRTCVideoRenderer renderer = renders.valueAt(i);
         if (renderer.checkVideoTrack(trackId, peerConnectionId)) {
