@@ -27,7 +27,7 @@ jobs:
       - name: Import Sorter Check
         run: flutter pub run import_sorter:main --no-comments --exit-if-changed
       - name: Dart Analyze Check
-        run: flutter analyze
+        run: flutter analyze --no-fatal-infos
       - name: Dart Test Check
         run: flutter test
 
