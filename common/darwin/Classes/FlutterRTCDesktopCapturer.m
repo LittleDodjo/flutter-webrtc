@@ -157,6 +157,8 @@ NSArray<RTCDesktopSource*>* _captureSources;
                        sourceId:nil
                        capturer:nil
                             fps:fps
+                    targetWidth:targetWidth
+                   targetHeight:targetHeight
                     mediaStream:mediaStream
                     videoSource:videoSource
                         trackId:trackUUID
@@ -184,6 +186,8 @@ NSArray<RTCDesktopSource*>* _captureSources;
                          sourceId:sourceId
                          capturer:desktopCapturer
                               fps:fps
+                      targetWidth:targetWidth
+                     targetHeight:targetHeight
                       mediaStream:mediaStream
                       videoSource:videoSource
                           trackId:trackUUID
@@ -208,6 +212,8 @@ NSArray<RTCDesktopSource*>* _captureSources;
                      sourceId:(NSString*)sourceId
                      capturer:(RTCDesktopCapturer*)desktopCapturer
                           fps:(NSInteger)fps
+                  targetWidth:(NSInteger)targetWidth
+                 targetHeight:(NSInteger)targetHeight
                   mediaStream:(RTCMediaStream*)mediaStream
                   videoSource:(RTCVideoSource*)videoSource
                       trackId:(NSString*)trackUUID
