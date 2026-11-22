@@ -36,3 +36,5 @@ third_party/downloads/
 third_party/libwebrtc/
 third_party/squeak_df_bin/
 third_party/squeak_df/target/
+
+android/.gradle

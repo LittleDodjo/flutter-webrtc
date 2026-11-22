@@ -61,6 +61,7 @@ import org.webrtc.Camera2Enumerator;
 import org.webrtc.Camera2Helper;
 import org.webrtc.CameraEnumerator;
 import org.webrtc.CameraVideoCapturer;
+import org.webrtc.HighSpeedCamera2Capturer;
 import org.webrtc.MediaConstraints;
 import org.webrtc.MediaStream;
 import org.webrtc.MediaStreamTrack;
@@ -764,12 +765,16 @@ public class GetUserMediaImpl {
         final boolean requestedFacingFront = isFacing;
         for (Map.Entry<String, VideoCapturerInfoEx> entry : mVideoCapturers.entrySet()) {
             VideoCapturerInfoEx existing = entry.getValue();
+            // Screen capturers are registered with a null cameraName, so these
+            // checks must run before cameraName is dereferenced below.
+            if (existing.isScreenCapture || existing.primaryTrackId != null
+                    || existing.videoSource == null || existing.cameraName == null) {
+                continue;
+            }
             boolean sameCamera = (deviceId != null && !deviceId.isEmpty())
                     ? existing.cameraName.equals(deviceId)
                     : cameraEnumerator.isFrontFacing(existing.cameraName) == requestedFacingFront;
-            if (!existing.isScreenCapture && existing.primaryTrackId == null
-                    && existing.videoSource != null && existing.cameraName != null
-                    && sameCamera) {
+            if (sameCamera) {
                 Log.w(TAG, "getUserMedia(video): camera already active (track=" + entry.getKey()
                         + "), reusing VideoSource to prevent concurrent camera access");
                 return buildSharedVideoTrack(existing, entry.getKey(), mediaStream);
@@ -803,9 +808,6 @@ public class GetUserMediaImpl {
             return null;
         }
 
-        videoCapturer.initialize(
-                surfaceTextureHelper, applicationContext, videoSource.getCapturerObserver());
-
         VideoCapturerInfoEx info = new VideoCapturerInfoEx();
 
         Integer videoWidth = getConstrainInt(videoConstraintsMap, "width");
@@ -828,6 +830,18 @@ public class GetUserMediaImpl {
                 : videoConstraintsMandatory != null && videoConstraintsMandatory.hasKey("minFrameRate")
                 ? videoConstraintsMandatory.getInt("minFrameRate")
                 : DEFAULT_FPS;
+
+        if (videoCapturer instanceof Camera2Capturer
+                && HighSpeedCamera2Capturer.isSupported(
+                applicationContext, deviceId, targetWidth, targetHeight, targetFps)) {
+            Log.i(TAG, "Using constrained high-speed Camera2 capturer for "
+                    + targetWidth + "x" + targetHeight + "@" + targetFps);
+            videoCapturer = new HighSpeedCamera2Capturer(
+                    applicationContext, deviceId, cameraEventsHandler);
+        }
+
+        videoCapturer.initialize(
+                surfaceTextureHelper, applicationContext, videoSource.getCapturerObserver());
 
         info.width = targetWidth;
         info.height = targetHeight;
