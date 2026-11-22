@@ -56,6 +56,17 @@ include_directories(
 )
 
 apply_standard_settings(${PLUGIN_NAME})
+# rnnoise — чужой C-код с сужающими преобразованиями: под /W4 /WX хоста
+# (пример плагина) его предупреждения роняют сборку.
+set_source_files_properties(
+  "../third_party/rnnoise/src/celt_lpc.c"
+  "../third_party/rnnoise/src/denoise.c"
+  "../third_party/rnnoise/src/kiss_fft.c"
+  "../third_party/rnnoise/src/pitch.c"
+  "../third_party/rnnoise/src/rnn.c"
+  "../third_party/rnnoise/src/rnn_data.c"
+  "../third_party/rnnoise/src/rnn_reader.c"
+  PROPERTIES COMPILE_OPTIONS "/W0;/WX-")
 set_target_properties(${PLUGIN_NAME} PROPERTIES
   CXX_VISIBILITY_PRESET hidden)
 target_compile_definitions(${PLUGIN_NAME} PRIVATE FLUTTER_PLUGIN_IMPL)
