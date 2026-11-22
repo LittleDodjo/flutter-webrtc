@@ -105,7 +105,7 @@ jobs:
         run: flutter build ios --release --no-codesign
 
   build-for-windows:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || github.event_name == 'pull_request'
     name: Build for Flutter Windows
     runs-on: windows-latest
 
@@ -156,7 +156,7 @@ jobs:
         run: flutter build macos --release
 
   build-for-linux:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || github.event_name == 'pull_request'
     name: Build for Flutter Linux
     runs-on: ubuntu-latest
 
